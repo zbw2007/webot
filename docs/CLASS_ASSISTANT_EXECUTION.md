@@ -7,7 +7,7 @@
 - 上游：`https://github.com/GuMu599/webot.git`
 - 基线 commit：`19b82a2f941eeebcaed37e386c34c96bba69a23d`
 - 当前分支：`feature/class-assistant`
-- 当前 HEAD：`f77521f`
+- 当前 HEAD：`eb05be4`
 - GitHub Fork：未绑定。当前环境没有 GitHub CLI，且没有可用的已认证 Fork 远程；未伪造 `origin`，代码仍与上游隔离。
 - 初始 Git 状态：下载后工作树干净；CowAgent 目录未触碰。
 
