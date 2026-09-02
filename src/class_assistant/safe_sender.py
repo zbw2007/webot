@@ -1,4 +1,5 @@
 from .send_guard import SendGuard
+from .send_guard import SendBlocked
 
 
 class SafeSender:
@@ -13,7 +14,9 @@ class SafeSender:
         if self.guard.dry_run or not self.guard.real_send_enabled:
             return {"sent": False, "dry_run": True}
         if before_send:
-            before_send()
+            claimed = before_send()
+            if claimed is False:
+                raise SendBlocked("draft was already claimed for sending")
         # If the callable raises, the draft remains in ``sending`` and is not
         # retried automatically; the operator can reconcile it explicitly.
         ok = bool(self.send_callable(target_chat_id, draft["text"]))

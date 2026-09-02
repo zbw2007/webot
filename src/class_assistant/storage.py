@@ -1,6 +1,7 @@
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -29,18 +30,18 @@ class Storage:
             UNIQUE(chat_id, message_id)
         );
         CREATE INDEX IF NOT EXISTS idx_captured_chat_time ON captured_messages(chat_id, timestamp);
-        CREATE TABLE IF NOT EXISTS digest_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, scheduled_slot TEXT UNIQUE NOT NULL, status TEXT NOT NULL, is_catch_up INTEGER NOT NULL DEFAULT 0, started_at INTEGER, completed_at INTEGER, error TEXT);
-        CREATE TABLE IF NOT EXISTS todo_items (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, due_at TEXT, status TEXT NOT NULL DEFAULT 'open', source_message_id TEXT, created_at INTEGER NOT NULL DEFAULT 0, completed_at INTEGER);
-        CREATE TABLE IF NOT EXISTS reply_drafts (id TEXT NOT NULL, version INTEGER NOT NULL, chat_id TEXT NOT NULL, group_name TEXT NOT NULL DEFAULT '', text TEXT NOT NULL, status TEXT NOT NULL, risk_level TEXT NOT NULL DEFAULT 'low', approved_version INTEGER, send_fingerprint TEXT, created_at INTEGER NOT NULL DEFAULT 0, expires_at INTEGER, UNIQUE(id, version));
+        CREATE TABLE IF NOT EXISTS digest_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, scheduled_slot TEXT UNIQUE NOT NULL, status TEXT NOT NULL, is_catch_up INTEGER NOT NULL DEFAULT 0, window_start TEXT, window_end TEXT, started_at INTEGER, completed_at INTEGER, error TEXT);
+        CREATE TABLE IF NOT EXISTS todo_items (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, due_at TEXT, due_confidence TEXT NOT NULL DEFAULT 'unknown', status TEXT NOT NULL DEFAULT 'open', source_message_id TEXT, created_at INTEGER NOT NULL DEFAULT 0, completed_at INTEGER);
+        CREATE TABLE IF NOT EXISTS reply_drafts (id TEXT NOT NULL, version INTEGER NOT NULL, chat_id TEXT NOT NULL, group_name TEXT NOT NULL DEFAULT '', text TEXT NOT NULL, status TEXT NOT NULL, risk_level TEXT NOT NULL DEFAULT 'low', approved_version INTEGER, send_fingerprint TEXT, source_message_id TEXT, created_at INTEGER NOT NULL DEFAULT 0, expires_at INTEGER, UNIQUE(id, version));
         CREATE TABLE IF NOT EXISTS audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, draft_id TEXT, action TEXT NOT NULL, actor TEXT NOT NULL DEFAULT '', details TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS group_whitelist (chat_id TEXT PRIMARY KEY, display_name TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS analysis_cursors (chat_id TEXT PRIMARY KEY, timestamp INTEGER NOT NULL DEFAULT 0, message_id TEXT NOT NULL DEFAULT '');
         """)
         # Add fields when opening databases created by the initial safety-core release.
         for table, columns in {
-            "digest_runs": {"run_id": "TEXT", "started_at": "INTEGER", "completed_at": "INTEGER", "error": "TEXT"},
-            "todo_items": {"group_id": "TEXT NOT NULL DEFAULT ''", "created_at": "INTEGER NOT NULL DEFAULT 0", "completed_at": "INTEGER"},
-            "reply_drafts": {"group_name": "TEXT NOT NULL DEFAULT ''", "approved_version": "INTEGER", "send_fingerprint": "TEXT", "created_at": "INTEGER NOT NULL DEFAULT 0", "expires_at": "INTEGER"},
+            "digest_runs": {"run_id": "TEXT", "window_start": "TEXT", "window_end": "TEXT", "started_at": "INTEGER", "completed_at": "INTEGER", "error": "TEXT"},
+            "todo_items": {"group_id": "TEXT NOT NULL DEFAULT ''", "due_confidence": "TEXT NOT NULL DEFAULT 'unknown'", "created_at": "INTEGER NOT NULL DEFAULT 0", "completed_at": "INTEGER"},
+            "reply_drafts": {"group_name": "TEXT NOT NULL DEFAULT ''", "approved_version": "INTEGER", "send_fingerprint": "TEXT", "source_message_id": "TEXT", "created_at": "INTEGER NOT NULL DEFAULT 0", "expires_at": "INTEGER"},
             "audit_events": {"actor": "TEXT NOT NULL DEFAULT ''", "details": "TEXT NOT NULL DEFAULT ''"},
         }.items():
             existing = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
@@ -58,6 +59,23 @@ class Storage:
     @_locked
     def close(self):
         self.conn.close()
+
+    @contextmanager
+    def transaction(self):
+        """Run a group of writes atomically on this connection.
+
+        The individual write helpers accept ``commit=False`` so a digest can
+        validate and persist all groups as one unit.  The re-entrant lock also
+        keeps concurrent scheduler/API operations from interleaving writes.
+        """
+        with self._lock:
+            try:
+                self.conn.execute("BEGIN")
+                yield self.conn
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
 
     @_locked
     def insert_message(self, message, expires_at=None):
@@ -82,7 +100,7 @@ class Storage:
         return (int(row[0]), str(row[1])) if row else (0, "")
 
     @_locked
-    def advance_analysis_cursor(self, chat_id, timestamp, message_id):
+    def advance_analysis_cursor(self, chat_id, timestamp, message_id, *, commit=True):
         current = self.get_analysis_cursor(chat_id)
         position = (int(timestamp), str(message_id))
         if position <= current:
@@ -91,7 +109,8 @@ class Storage:
             "INSERT INTO analysis_cursors(chat_id,timestamp,message_id) VALUES(?,?,?) ON CONFLICT(chat_id) DO UPDATE SET timestamp=excluded.timestamp,message_id=excluded.message_id",
             (chat_id, position[0], position[1]),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return position
 
     @_locked
@@ -111,21 +130,32 @@ class Storage:
         return cur.rowcount
 
     @_locked
-    def insert_digest_run(self, run):
-        self.conn.execute("INSERT OR REPLACE INTO digest_runs(run_id,scheduled_slot,status,is_catch_up,started_at,completed_at,error) VALUES(?,?,?,?,?,?,?)", tuple(run.get(k) for k in ("run_id", "scheduled_slot", "status", "is_catch_up")) + (run.get("started_at"), run.get("completed_at"), run.get("error")))
-        self.conn.commit()
+    def insert_digest_run(self, run, *, commit=True):
+        self.conn.execute("INSERT OR REPLACE INTO digest_runs(run_id,scheduled_slot,status,is_catch_up,window_start,window_end,started_at,completed_at,error) VALUES(?,?,?,?,?,?,?,?,?)", tuple(run.get(k) for k in ("run_id", "scheduled_slot", "status", "is_catch_up", "window_start", "window_end", "started_at", "completed_at", "error")))
+        if commit:
+            self.conn.commit()
         return self.conn.execute("SELECT * FROM digest_runs WHERE scheduled_slot=?", (run["scheduled_slot"],)).fetchone()
 
     @_locked
-    def insert_todo(self, todo):
-        cur = self.conn.execute("INSERT INTO todo_items(group_id,title,due_at,status,source_message_id,created_at) VALUES(?,?,?,?,?,?)", (todo.get("group_id", ""), todo["title"], todo.get("due_at"), todo.get("status", "open"), todo.get("source_message_id"), todo.get("created_at", int(time.time()))))
-        self.conn.commit()
+    def insert_todo(self, todo, *, commit=True):
+        existing = self.conn.execute(
+            "SELECT * FROM todo_items WHERE group_id=? AND title=? "
+            "AND COALESCE(due_at,'')=COALESCE(?, '') "
+            "AND COALESCE(source_message_id,'')=COALESCE(?, '') LIMIT 1",
+            (todo.get("group_id", ""), todo["title"], todo.get("due_at"), todo.get("source_message_id")),
+        ).fetchone()
+        if existing is not None:
+            return existing
+        cur = self.conn.execute("INSERT INTO todo_items(group_id,title,due_at,due_confidence,status,source_message_id,created_at) VALUES(?,?,?,?,?,?,?)", (todo.get("group_id", ""), todo["title"], todo.get("due_at"), todo.get("due_confidence", "unknown"), todo.get("status", "open"), todo.get("source_message_id"), todo.get("created_at", int(time.time()))))
+        if commit:
+            self.conn.commit()
         return self.conn.execute("SELECT * FROM todo_items WHERE id=?", (cur.lastrowid,)).fetchone()
 
     @_locked
-    def insert_reply_draft(self, draft):
-        self.conn.execute("INSERT OR REPLACE INTO reply_drafts(id,version,chat_id,group_name,text,status,risk_level,approved_version,send_fingerprint,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (draft["id"], draft["version"], draft["chat_id"], draft.get("group_name", ""), draft["text"], draft.get("status", "pending_review"), draft.get("risk_level", "low"), draft.get("approved_version"), draft.get("send_fingerprint"), draft.get("created_at", int(time.time())), draft.get("expires_at")))
-        self.conn.commit()
+    def insert_reply_draft(self, draft, *, commit=True):
+        self.conn.execute("INSERT OR IGNORE INTO reply_drafts(id,version,chat_id,group_name,text,status,risk_level,approved_version,send_fingerprint,source_message_id,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (draft["id"], draft["version"], draft["chat_id"], draft.get("group_name", ""), draft["text"], draft.get("status", "pending_review"), draft.get("risk_level", "low"), draft.get("approved_version"), draft.get("send_fingerprint"), draft.get("source_message_id"), draft.get("created_at", int(time.time())), draft.get("expires_at")))
+        if commit:
+            self.conn.commit()
         return self.conn.execute("SELECT * FROM reply_drafts WHERE id=? AND version=?", (draft["id"], draft["version"])).fetchone()
 
     @_locked
@@ -139,6 +169,17 @@ class Storage:
             "SELECT * FROM reply_drafts WHERE id=? AND version=?", (draft_id, version)
         ).fetchone()
         return dict(row) if row else None
+
+    @_locked
+    def claim_draft_for_sending(self, draft_id, version):
+        """Atomically claim an approved draft for a real send attempt."""
+        cur = self.conn.execute(
+            "UPDATE reply_drafts SET status='sending' "
+            "WHERE id=? AND version=? AND status='approved' AND approved_version=?",
+            (draft_id, version, version),
+        )
+        self.conn.commit()
+        return cur.rowcount == 1
 
     @_locked
     def set_draft_fingerprint(self, draft_id, version, fingerprint):

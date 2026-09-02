@@ -19,6 +19,7 @@ class Config:
     digest_schedule = "08:00,20:00"
     raw_message_retention_days = 7
     draft_retention_days = 30
+    audit_retention_days = 30
 
 
 def message(message_id, chat_id="class@chatroom", is_group=True, timestamp=1):
@@ -67,6 +68,7 @@ def test_run_digest_persists_todo_and_reply_draft_without_sending(tmp_path):
     drafts = storage.query("reply_drafts")
     assert len(drafts) == 1
     assert drafts[0]["status"] == "pending_review"
+    assert drafts[0]["source_message_id"] == "m1"
     service.approve_draft(drafts[0]["id"], version=1)
     assert service.send_draft(drafts[0]["id"], confirmation_token=None)["dry_run"] is True
 
@@ -124,7 +126,7 @@ def test_real_send_crash_leaves_sending_for_reconciliation(tmp_path):
     def broken_sender(_chat_id, _text):
         raise RuntimeError("window disappeared")
 
-    service = ClassAssistantService(config, storage=storage, sender=broken_sender)
+    service = ClassAssistantService(config, storage=storage, sender=broken_sender, window_validator=lambda _chat, _group: True)
     storage.insert_reply_draft({
         "id": "draft-1", "version": 1, "chat_id": "class@chatroom",
         "group_name": "Class", "text": "收到", "status": "pending_review",
@@ -175,3 +177,57 @@ def test_high_risk_draft_requires_edit_before_approval(tmp_path):
         service.approve_draft("draft-risk", 1)
     edited = service.edit_draft("draft-risk", "老师您好，我想申请请假，请您确认。")
     assert service.approve_draft("draft-risk", edited["version"])["status"] == "approved"
+
+
+def test_edit_and_reject_do_not_mutate_terminal_drafts(tmp_path):
+    storage = Storage(str(tmp_path / "assistant.db"))
+    service = ClassAssistantService(Config(), storage=storage)
+    storage.insert_reply_draft({
+        "id": "draft-terminal", "version": 1, "chat_id": "class@chatroom",
+        "group_name": "Class", "text": "收到", "status": "sent", "risk_level": "low",
+    })
+    with pytest.raises(ValueError):
+        service.edit_draft("draft-terminal", "改写")
+    with pytest.raises(ValueError):
+        service.reject_draft("draft-terminal", 1)
+
+
+def test_digest_rolls_back_all_groups_on_late_failure(tmp_path):
+    storage = Storage(str(tmp_path / "assistant.db"))
+    config = Config()
+    config.class_assistant_groups = ["class@chatroom", "second@chatroom"]
+
+    def model(messages):
+        if messages[0]["chat_id"] == "second@chatroom":
+            raise RuntimeError("second group failed")
+        return {"summary": "ok", "todos": [{"title": "一项"}], "reply_candidates": []}
+
+    service = ClassAssistantService(config, storage=storage, model_call=model)
+    service.handle(message("first", "class@chatroom", timestamp=100))
+    service.handle(message("second", "second@chatroom", timestamp=100))
+    result = service.run_digest(now=datetime.fromisoformat("2026-09-02T20:01:00+08:00"), force=True)
+    assert result["status"] == "failed"
+    assert storage.query("todo_items") == []
+    assert storage.get_analysis_cursor("class@chatroom") == (0, "")
+
+
+def test_real_send_claim_is_atomic_and_reconcile_is_explicit(tmp_path):
+    storage = Storage(str(tmp_path / "assistant.db"))
+    config = Config()
+    config.class_assistant_dry_run = False
+    config.class_assistant_real_send_enabled = True
+    service = ClassAssistantService(
+        config,
+        storage=storage,
+        sender=lambda _chat, _text: True,
+        window_validator=lambda _chat, _group: True,
+    )
+    storage.insert_reply_draft({
+        "id": "draft-claim", "version": 1, "chat_id": "class@chatroom",
+        "group_name": "Class", "text": "收到", "status": "approved", "approved_version": 1,
+        "risk_level": "low",
+    })
+    token = service.issue_confirmation_token()
+    assert service.send_draft("draft-claim", version=1, confirmation_token=token)["sent"] is True
+    with pytest.raises(ValueError):
+        service.reconcile_draft("draft-claim", 1, "sent")

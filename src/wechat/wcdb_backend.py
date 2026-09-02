@@ -187,6 +187,29 @@ class WcdbBackend(AbstractWeChatBackend):
 
         return self._send_and_confirm(group_name, chat_id, content)
 
+    def validate_send_target(self, chat_id: str, group_name: str) -> bool:
+        """Validate the backend-owned WeChat window before a real send.
+
+        The browser/API cannot supply a trustworthy window title.  Resolve the
+        chat id through WCDB and validate the currently visible WeChat window
+        here, immediately before the sender claims a draft.
+        """
+        if not chat_id or not group_name:
+            return False
+        try:
+            resolved = self._talker_to_name(chat_id)
+            if resolved != group_name:
+                return False
+            hwnd = self._window.find_hwnd()
+            if not hwnd or not self._window._validate_hwnd(hwnd):
+                return False
+            if not self._window._foreground_matches(hwnd):
+                return False
+            return bool(self._window._verify_chat_title(hwnd, group_name))
+        except Exception:
+            logger.exception("Failed to validate real-send target chat_id=%s", chat_id)
+            return False
+
     def stop(self) -> None:
         self._running = False
         if self._pool:

@@ -1082,6 +1082,19 @@ class _UIHandler(SimpleHTTPRequestHandler):
 
     def _handle_class_assistant_request(self):
         """Serve the local, approval-gated class-assistant API."""
+        # The server is bound to loopback, but also reject forged Host/Origin
+        # values for this API.  Keep the no-header path permissive for the
+        # lightweight handler unit tests.
+        headers = getattr(self, "headers", None)
+        if headers is not None:
+            host = str(headers.get("Host", ""))
+            if host and host.split(":", 1)[0] not in {"127.0.0.1", "localhost"}:
+                self.send_json({"ok": False, "error": "class assistant API is local-only"})
+                return
+            origin = str(headers.get("Origin", ""))
+            if origin and not (origin.startswith("http://127.0.0.1:") or origin.startswith("http://localhost:")):
+                self.send_json({"ok": False, "error": "class assistant API origin is not allowed"})
+                return
         service = _get_class_assistant_service()
         parsed = urlsplit(self.path)
         path = parsed.path.rstrip("/")
@@ -1148,8 +1161,16 @@ class _UIHandler(SimpleHTTPRequestHandler):
                         draft_id,
                         version=int(data["version"]),
                         confirmation_token=str(data["confirmation_token"]),
-                        target_group_name=data.get("target_group_name"),
-                        current_window=data.get("current_window"),
+                    )
+                elif action in {"mark-sent", "mark-failed"} and self.command == "POST":
+                    if "version" not in data:
+                        raise ValueError("version is required")
+                    outcome = "sent" if action == "mark-sent" else "failed"
+                    result = service.reconcile_draft(
+                        draft_id,
+                        version=int(data["version"]),
+                        outcome=outcome,
+                        actor=str(data.get("actor", "local")),
                     )
                 else:
                     raise ValueError("unsupported draft action")
@@ -1351,6 +1372,13 @@ class _UIHandler(SimpleHTTPRequestHandler):
             body = self.rfile.read(content_len) if content_len else b"{}"
             try:
                 config = json.loads(body)
+                assistant_groups = config.get("class_assistant_groups", []) or []
+                if isinstance(assistant_groups, str):
+                    assistant_groups = [part.strip() for part in assistant_groups.split(",") if part.strip()]
+                if "*" in assistant_groups:
+                    raise ValueError("CLASS_ASSISTANT_GROUPS must not contain '*'")
+                if str(config.get("digest_schedule", "08:00,20:00")).replace(" ", "") != "08:00,20:00":
+                    raise ValueError("DIGEST_SCHEDULE must be exactly '08:00,20:00'")
                 env_path = _find_or_create_env()
                 if env_path.exists():
                     lines = env_path.read_text(encoding="utf-8").splitlines()

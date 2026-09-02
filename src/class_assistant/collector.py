@@ -17,7 +17,7 @@ class ReadOnlyCollector:
                 return self.cursor
             for message in page:
                 position = (int(message["timestamp"]), str(message["message_id"]))
-                if not self.whitelist.allows(message.get("chat_id"), message.get("is_group", True)):
+                if not self.whitelist.allows(message.get("chat_id"), message.get("is_group", False)):
                     self.cursor = max(self.cursor, position)
                     continue
                 if self.dedup.accept(message):

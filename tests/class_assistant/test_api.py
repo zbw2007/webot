@@ -65,3 +65,15 @@ def test_emergency_stop_blocks_future_collection(tmp_path):
     assert response["ok"] is True
     service.handle({"message_id": "x", "chat_id": "class@chatroom", "is_group": True, "content": "通知", "timestamp": 1})
     assert storage.count_messages() == 0
+
+
+def test_reconcile_endpoint_requires_sending_state(tmp_path):
+    storage = Storage(str(tmp_path / "assistant.db"))
+    service = ClassAssistantService(Config(), storage=storage)
+    storage.insert_reply_draft({
+        "id": "draft-1", "version": 1, "chat_id": "class@chatroom",
+        "group_name": "Class", "text": "收到", "status": "pending_review",
+        "risk_level": "low",
+    })
+    response = call_api(service, "/api/class-assistant/drafts/draft-1/mark-sent", "POST", {"version": 1})
+    assert response["ok"] is False

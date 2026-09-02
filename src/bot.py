@@ -256,9 +256,9 @@ class Bot:
         self._backend = backend
         self.backend = backend   # public ref for lifecycle control
 
-        # Optional whitelist-only class-assistant pipeline.  In-scope class
-        # messages bypass the legacy router so they cannot trigger an
-        # automatic model reply or send; they are collected for later review.
+        # Optional whitelist-only class-assistant pipeline.  When enabled,
+        # every callback is consumed by the assistant gate so no message can
+        # fall through to the legacy automatic-reply router.
         callback = router.handle
         if getattr(config, "class_assistant_enabled", False):
             self._class_assistant = ClassAssistantService(
@@ -266,6 +266,7 @@ class Bot:
                 storage=ClassAssistantStorage(config.db_path),
                 summarizer=summarizer,
                 sender=backend.send_text,
+                window_validator=getattr(backend, "validate_send_target", None),
             )
             self._class_assistant.start()
             try:
@@ -275,10 +276,13 @@ class Bot:
                 logger.exception("Could not register class-assistant service with Web UI")
 
             def callback(message):
-                if self._class_assistant and self._class_assistant.is_in_scope(message):
+                # Once class-assistant mode is enabled, every incoming
+                # message is consumed by its whitelist gate.  Do not fall
+                # through to the legacy router: private/non-whitelisted
+                # messages must never receive an automatic reply.
+                if self._class_assistant:
                     self._class_assistant.handle(message)
                     return None
-                return router.handle(message)
 
         # Register backend with web server for stop/restart (explicit
         # API — no monkey-patching needed).
@@ -337,7 +341,12 @@ class Bot:
             if self._health:
                 self._health.stop()
             if self._class_assistant:
-                self._class_assistant.stop()
+                self._class_assistant.close()
+                try:
+                    from .web.server import register_class_assistant_service
+                    register_class_assistant_service(None)
+                except Exception:
+                    pass
             if self._conn is not None:
                 self._conn.close()
             if hasattr(self, 'backend') and hasattr(self.backend, 'router'):
@@ -376,6 +385,14 @@ class Bot:
         groups = [
             g.strip() for g in config.wechat_groups.split(",") if g.strip()
         ]
+        if getattr(config, "class_assistant_enabled", False):
+            # The assistant whitelist is the backend polling scope as well as
+            # the storage scope.  An empty whitelist intentionally results in
+            # no polling; it must never inherit WECHAT_GROUPS='*'.
+            assistant_groups = getattr(config, "class_assistant_groups", []) or []
+            if isinstance(assistant_groups, str):
+                assistant_groups = [g.strip() for g in assistant_groups.split(",") if g.strip()]
+            groups = list(assistant_groups)
 
         if config.wechat_backend == "wcdb":
             from .wechat.wcdb_backend import WcdbBackend

@@ -1,4 +1,5 @@
 import json
+from typing import Literal
 
 try:  # Optional at import time so read-only collection works without clients.
     from pydantic import BaseModel, ConfigDict, Field
@@ -11,14 +12,14 @@ if BaseModel is not None:
         model_config = ConfigDict(extra="forbid")
         title: str
         due_at: str | None = None
-        due_confidence: str = "unknown"
+        due_confidence: Literal["high", "medium", "low", "unknown", "needs_confirmation"] = "unknown"
         group_id: str | None = None
         source_message_id: str | None = None
 
     class _ReplyPayload(BaseModel):
         model_config = ConfigDict(extra="forbid")
         text: str
-        risk_level: str = "low"
+        risk_level: Literal["low", "medium", "high"] = "low"
         source_message_id: str | None = None
 
     class _AnalysisPayload(BaseModel):
@@ -50,9 +51,13 @@ def analyze(messages, call_model):
     for todo in result["todos"]:
         if not isinstance(todo, dict) or not isinstance(todo.get("title"), str) or not todo["title"].strip():
             raise AnalysisError("todo schema invalid")
+        if todo.get("due_confidence", "unknown") not in {"high", "medium", "low", "unknown", "needs_confirmation"}:
+            raise AnalysisError("todo due confidence invalid")
     for candidate in result["reply_candidates"]:
         if not isinstance(candidate, dict) or not isinstance(candidate.get("text"), str) or not candidate["text"].strip():
             raise AnalysisError("reply candidate schema invalid")
+        if candidate.get("risk_level", "low") not in {"low", "medium", "high"}:
+            raise AnalysisError("reply risk level invalid")
     return result
 
 

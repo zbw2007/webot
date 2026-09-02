@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 
-const API = 'http://127.0.0.1:7327'
+const API = (window.location.protocol === 'http:' || window.location.protocol === 'https:')
+  ? window.location.origin
+  : 'http://127.0.0.1:7327'
 
 async function request(path, options = {}) {
   const response = await fetch(`${API}${path}`, {
@@ -18,28 +20,47 @@ export default function ClassAssistantPanel() {
   const [todos, setTodos] = useState([])
   const [drafts, setDrafts] = useState([])
   const [groups, setGroups] = useState([])
+  const [settings, setSettings] = useState(null)
+  const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
       setError('')
-      const [s, d, t, r, g] = await Promise.all([
+      const [s, d, t, r, g, c] = await Promise.all([
         request('/api/class-assistant/status'),
         request('/api/class-assistant/digests'),
         request('/api/class-assistant/todos?status=open'),
         request('/api/class-assistant/drafts'),
         request('/api/class-assistant/groups'),
+        fetch(`${API}/api/load-config`).then(res => res.json()),
       ])
       setStatus(s.status)
       setDigests(d.items || [])
       setTodos(t.items || [])
       setDrafts(r.items || [])
       setGroups(g.items || [])
+      if (c.ok && !settings) setSettings(c.config)
     } catch (e) {
       setError(e.message)
     }
-  }, [])
+  }, [settings])
+
+  async function saveSettings() {
+    if (!settings) return
+    const groups = Array.isArray(settings.class_assistant_groups)
+      ? settings.class_assistant_groups
+      : String(settings.class_assistant_groups || '').split(',').map(v => v.trim()).filter(Boolean)
+    if (groups.includes('*')) { setError('班级助手白名单不能使用 *'); return }
+    setBusy(true)
+    try {
+      await request('/api/config', { method: 'POST', body: JSON.stringify({ ...settings, class_assistant_groups: groups }) })
+      setSettings({ ...settings, class_assistant_groups: groups })
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2500)
+    } catch (e) { setError(e.message) } finally { setBusy(false) }
+  }
 
   useEffect(() => { refresh(); const timer = setInterval(refresh, 30000); return () => clearInterval(timer) }, [refresh])
 
@@ -61,7 +82,9 @@ export default function ClassAssistantPanel() {
   }
 
   async function send(draft) {
-    if (!window.confirm('确认发送到白名单群？真实发送仍受 DRY_RUN/REAL_SEND_ENABLED 双重保护。')) return
+    const group = draft.group_name || draft.chat_id
+    const preview = draft.text.length > 240 ? `${draft.text.slice(0, 240)}…` : draft.text
+    if (!window.confirm(`确认发送到群“${group}”吗？\n\n版本：v${draft.version}\n内容：\n${preview}\n\n真实发送仍受 DRY_RUN/REAL_SEND_ENABLED 双重保护。`)) return
     setBusy(true)
     try {
       const token = await request('/api/class-assistant/token', { method: 'POST', body: '{}' })
@@ -101,14 +124,29 @@ export default function ClassAssistantPanel() {
         ].map(([label, value]) => <div key={label} className="p-4 rounded-xl bg-bg-raised border border-border-main"><div className="text-xs text-text-muted">{label}</div><div className="mt-1 text-base font-semibold text-text-main">{value}</div></div>)}
       </div>
 
+      <section className="p-5 rounded-xl bg-bg-raised border border-border-main space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <div><h4 className="font-semibold text-text-main">设置与安全</h4><p className="text-xs text-text-muted mt-1">保存后重启 WeBot 生效；真实发送默认关闭。</p></div>
+          <button onClick={saveSettings} disabled={busy || !settings} className="px-3 py-1.5 rounded-md bg-brand-green text-black text-xs disabled:opacity-50">{saved ? '已保存' : '保存设置'}</button>
+        </div>
+        {settings && <div className="grid md:grid-cols-2 gap-3 text-sm">
+          <label className="flex items-center gap-2"><input type="checkbox" checked={!!settings.class_assistant_enabled} onChange={e => setSettings({ ...settings, class_assistant_enabled: e.target.checked })} />启用班级事务助手</label>
+          <label className="flex items-center gap-2"><input type="checkbox" checked={!!settings.collection_enabled} onChange={e => setSettings({ ...settings, collection_enabled: e.target.checked })} />只读采集</label>
+          <label className="flex items-center gap-2"><input type="checkbox" checked={!!settings.analysis_enabled} onChange={e => setSettings({ ...settings, analysis_enabled: e.target.checked })} />半日分析</label>
+          <label className="flex items-center gap-2"><input type="checkbox" checked={!!settings.dry_run} onChange={e => setSettings({ ...settings, dry_run: e.target.checked })} />DRY RUN（推荐开启）</label>
+          <label className="flex items-center gap-2"><input type="checkbox" checked={!!settings.real_send_enabled} onChange={e => setSettings({ ...settings, real_send_enabled: e.target.checked })} />允许真实发送（高风险）</label>
+          <label className="md:col-span-2"><span className="block text-xs text-text-muted mb-1">白名单群 chat_id（逗号分隔，禁止 *）</span><input className="w-full px-3 py-2 rounded-md bg-bg-main border border-border-main" value={Array.isArray(settings.class_assistant_groups) ? settings.class_assistant_groups.join(',') : (settings.class_assistant_groups || '')} onChange={e => setSettings({ ...settings, class_assistant_groups: e.target.value.split(',').map(v => v.trim()).filter(Boolean) })} /></label>
+        </div>}
+      </section>
+
       <section className="p-5 rounded-xl bg-bg-raised border border-border-main">
         <h4 className="font-semibold text-text-main mb-3">待办清单</h4>
-        {todos.length === 0 ? <p className="text-sm text-text-muted">暂无待办</p> : <div className="space-y-2">{todos.map(todo => <div key={todo.id} className="flex justify-between gap-3 text-sm"><span className="text-text-main">{todo.title}</span><span className="text-text-muted">{todo.due_at || '待确认日期'}</span></div>)}</div>}
+        {todos.length === 0 ? <p className="text-sm text-text-muted">暂无待办</p> : <div className="space-y-2">{todos.map(todo => <div key={todo.id} className="flex justify-between gap-3 text-sm"><span className="text-text-main">{todo.title}</span><span className="text-text-muted">{todo.due_at || `待确认日期（${todo.due_confidence || 'unknown'}）`}</span></div>)}</div>}
       </section>
 
       <section className="p-5 rounded-xl bg-bg-raised border border-border-main">
         <h4 className="font-semibold text-text-main mb-3">回复审核队列</h4>
-        {drafts.length === 0 ? <p className="text-sm text-text-muted">暂无草稿</p> : <div className="space-y-3">{drafts.map(draft => <div key={`${draft.id}:${draft.version}`} className="p-4 rounded-lg bg-bg-main border border-border-main"><div className="flex items-center justify-between gap-2"><span className="text-xs text-text-muted">{draft.group_name || draft.chat_id} · v{draft.version} · {draft.status}</span><span className="text-xs text-text-muted">风险：{draft.risk_level}</span></div><p className="mt-2 text-sm whitespace-pre-wrap text-text-main">{draft.text}</p><div className="mt-3 flex gap-2">{['pending_review', 'edited'].includes(draft.status) && <><button disabled={busy} onClick={() => edit(draft)} className="px-3 py-1.5 rounded-md border border-border-main text-xs">编辑</button><button disabled={busy} onClick={() => approve(draft)} className="px-3 py-1.5 rounded-md bg-brand-green text-black text-xs">批准</button><button disabled={busy} onClick={() => reject(draft)} className="px-3 py-1.5 rounded-md border border-red-500/30 text-red-300 text-xs">拒绝</button></>}{draft.status === 'approved' && <button disabled={busy} onClick={() => send(draft)} className="px-3 py-1.5 rounded-md bg-brand-green text-black text-xs">确认发送</button>}</div></div>)}</div>}
+        {drafts.length === 0 ? <p className="text-sm text-text-muted">暂无草稿</p> : <div className="space-y-3">{drafts.map(draft => <div key={`${draft.id}:${draft.version}`} className="p-4 rounded-lg bg-bg-main border border-border-main"><div className="flex items-center justify-between gap-2"><span className="text-xs text-text-muted">{draft.group_name || draft.chat_id} · v{draft.version} · {draft.status} · 来源：{draft.source_message_id || '未知'}</span><span className="text-xs text-text-muted">风险：{draft.risk_level}</span></div><p className="mt-2 text-sm whitespace-pre-wrap text-text-main">{draft.text}</p><div className="mt-3 flex gap-2">{['pending_review', 'edited'].includes(draft.status) && <><button disabled={busy} onClick={() => edit(draft)} className="px-3 py-1.5 rounded-md border border-border-main text-xs">编辑</button><button disabled={busy} onClick={() => approve(draft)} className="px-3 py-1.5 rounded-md bg-brand-green text-black text-xs">批准</button><button disabled={busy} onClick={() => reject(draft)} className="px-3 py-1.5 rounded-md border border-red-500/30 text-red-300 text-xs">拒绝</button></>}{draft.status === 'approved' && <button disabled={busy} onClick={() => send(draft)} className="px-3 py-1.5 rounded-md bg-brand-green text-black text-xs">确认发送</button>}</div></div>)}</div>}
       </section>
 
       <section className="p-5 rounded-xl bg-bg-raised border border-border-main">

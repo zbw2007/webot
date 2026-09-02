@@ -22,7 +22,7 @@ from .analyzer import AnalysisError, analyze
 from .models import require_message
 from .safe_sender import SafeSender
 from .scheduler import catch_up_slot, scheduled_slot
-from .send_guard import SendGuard
+from .send_guard import SendBlocked, SendGuard
 from .storage import Storage
 from .whitelist import GroupWhitelist
 
@@ -39,6 +39,7 @@ class ClassAssistantService:
         storage: Storage | None = None,
         model_call: Callable[[list[dict[str, Any]]], Any] | None = None,
         sender: Callable[[str, str], bool] | None = None,
+        window_validator: Callable[[str, str], bool] | None = None,
         summarizer: Any | None = None,
         now: Callable[[], float] | None = None,
     ) -> None:
@@ -56,6 +57,7 @@ class ClassAssistantService:
         self._storage.conn.commit()
         self._model_call = model_call
         self._sender = sender or (lambda _chat_id, _text: False)
+        self._window_validator = window_validator
         self._clock = now or time.time
         self._summarizer = summarizer
         self._running = False
@@ -73,6 +75,10 @@ class ClassAssistantService:
         """Attach the backend sender after the backend has been constructed."""
         self._sender = sender
         self._safe_sender.send_callable = sender
+
+    def set_window_validator(self, validator: Callable[[str, str], bool] | None) -> None:
+        """Attach a backend-owned current-window/target validator."""
+        self._window_validator = validator
 
     @property
     def whitelist(self) -> GroupWhitelist:
@@ -199,10 +205,12 @@ class ClassAssistantService:
 
     @staticmethod
     def _source_id(item: Mapping[str, Any], messages: Iterable[Mapping[str, Any]]) -> str | None:
+        message_list = list(messages)
+        valid_ids = {str(message.get("message_id")) for message in message_list}
         source = item.get("source_message_id")
-        if source:
+        if source and str(source) in valid_ids:
             return str(source)
-        first = next(iter(messages), None)
+        first = message_list[0] if message_list else None
         return str(first["message_id"]) if first else None
 
     @staticmethod
@@ -240,19 +248,37 @@ class ClassAssistantService:
             by_group: dict[str, list[dict[str, Any]]] = {}
             for message in messages:
                 by_group.setdefault(str(message["chat_id"]), []).append(message)
+            window_start = window_end = None
+            if messages:
+                from zoneinfo import ZoneInfo
+
+                zone = ZoneInfo(getattr(self.config, "timezone", "Asia/Shanghai"))
+                timestamps = [int(message["timestamp"]) for message in messages]
+                window_start = datetime.fromtimestamp(min(timestamps), zone).isoformat()
+                window_end = datetime.fromtimestamp(max(timestamps), zone).isoformat()
             summaries: list[str] = []
+            analyzed_groups: list[tuple[str, list[dict[str, Any]], dict[str, Any]]] = []
             for chat_id, group_messages in by_group.items():
                 # Analyze each whitelisted group independently so a teacher's
                 # notice never gets mixed with another class's context.
                 result = analyze(group_messages, self._call_model)
                 if result.get("summary"):
                     summaries.append(str(result["summary"]))
+                analyzed_groups.append((chat_id, group_messages, result))
+
+            # Build all rows before writing any of them.  A model/schema error
+            # in a later group therefore cannot leave an earlier group partly
+            # persisted or advance its cursor.
+            todo_rows: list[dict[str, Any]] = []
+            draft_rows: list[dict[str, Any]] = []
+            for chat_id, group_messages, result in analyzed_groups:
                 default_source = group_messages[0]["message_id"] if group_messages else None
                 for todo in result.get("todos", []):
-                    self._storage.insert_todo({
+                    todo_rows.append({
                         "group_id": todo.get("group_id") or chat_id,
                         "title": todo["title"].strip(),
                         "due_at": todo.get("due_at"),
+                        "due_confidence": todo.get("due_confidence", "unknown"),
                         "status": "open",
                         "source_message_id": self._source_id(todo, group_messages) or default_source,
                         "created_at": started,
@@ -262,7 +288,7 @@ class ClassAssistantService:
                     source_row = next((row for row in group_messages if row["message_id"] == source_id), group_messages[0] if group_messages else {})
                     draft_id = f"draft-{slot}-{chat_id}-{index}"
                     text = candidate["text"].strip()
-                    self._storage.insert_reply_draft({
+                    draft_rows.append({
                         "id": draft_id,
                         "version": 1,
                         "chat_id": source_row.get("chat_id", chat_id),
@@ -270,24 +296,33 @@ class ClassAssistantService:
                         "text": text,
                         "status": "pending_review",
                         "risk_level": self._risk(candidate),
-                        "send_fingerprint": self._fingerprint(text),
+                        "send_fingerprint": self._fingerprint(source_row.get("chat_id", chat_id), text),
+                        "source_message_id": source_id,
                         "created_at": started,
                         "expires_at": started + int(getattr(self.config, "draft_retention_days", 30)) * 86400,
                     })
-            # Advance analysis cursors only after every group's response has
-            # passed schema validation and all records have been persisted.
-            for chat_id, group_messages in by_group.items():
-                if group_messages:
-                    last = max(group_messages, key=lambda item: (int(item["timestamp"]), str(item["message_id"])))
-                    self._storage.advance_analysis_cursor(chat_id, last["timestamp"], last["message_id"])
-            self._storage.insert_digest_run({
-                "run_id": run_id,
-                "scheduled_slot": slot,
-                "status": "succeeded",
-                "is_catch_up": int(is_catch_up),
-                "started_at": started,
-                "completed_at": int(self._clock()),
-            })
+            with self._storage.transaction():
+                for todo in todo_rows:
+                    self._storage.insert_todo(todo, commit=False)
+                for draft in draft_rows:
+                    self._storage.insert_reply_draft(draft, commit=False)
+                # Advance analysis cursors only after every group's response
+                # passed schema validation and all records are in the same
+                # transaction as the successful digest marker.
+                for chat_id, group_messages in by_group.items():
+                    if group_messages:
+                        last = max(group_messages, key=lambda item: (int(item["timestamp"]), str(item["message_id"])))
+                        self._storage.advance_analysis_cursor(chat_id, last["timestamp"], last["message_id"], commit=False)
+                self._storage.insert_digest_run({
+                    "run_id": run_id,
+                    "scheduled_slot": slot,
+                    "status": "succeeded",
+                    "is_catch_up": int(is_catch_up),
+                    "window_start": window_start,
+                    "window_end": window_end,
+                    "started_at": started,
+                    "completed_at": int(self._clock()),
+                }, commit=False)
             self._last_error = None
             return {"status": "succeeded", "scheduled_slot": slot, "summary": "\n".join(summaries)}
         except Exception as exc:
@@ -298,6 +333,8 @@ class ClassAssistantService:
                 "scheduled_slot": slot,
                 "status": "failed",
                 "is_catch_up": int(is_catch_up),
+                "window_start": locals().get("window_start"),
+                "window_end": locals().get("window_end"),
                 "started_at": started,
                 "completed_at": int(self._clock()),
                 "error": str(exc),
@@ -334,6 +371,8 @@ class ClassAssistantService:
         draft = self._latest_draft(draft_id)
         if draft is None:
             raise ValueError("draft not found")
+        if draft["status"] not in {"pending_review", "edited", "approved"}:
+            raise ValueError("draft cannot be edited in its current state")
         version = int(draft["version"]) + 1
         result = self._storage.insert_reply_draft({
             "id": draft_id,
@@ -343,6 +382,7 @@ class ClassAssistantService:
             "text": text.strip(),
             "status": "edited",
             "risk_level": draft["risk_level"],
+            "source_message_id": draft.get("source_message_id"),
             "created_at": int(self._clock()),
             "expires_at": draft["expires_at"],
         })
@@ -353,6 +393,8 @@ class ClassAssistantService:
         draft = self._latest_draft(draft_id)
         if draft is None or int(draft["version"]) != int(version):
             raise ValueError("draft version is not the latest version")
+        if draft["status"] not in {"pending_review", "edited", "approved"}:
+            raise ValueError("draft cannot be rejected in its current state")
         result = self._write_draft_status(draft_id, version, "rejected", None)
         self._storage.insert_audit({"draft_id": draft_id, "action": "rejected", "actor": actor, "details": f"version={version}"})
         return result
@@ -371,13 +413,17 @@ class ClassAssistantService:
             raise ValueError("draft not found")
         if version is not None and int(draft["version"]) != int(version):
             raise ValueError("draft version is not the latest version")
-        fingerprint = draft.get("send_fingerprint") or self._fingerprint(draft.get("text", ""))
+        fingerprint = draft.get("send_fingerprint") or self._fingerprint(draft.get("chat_id", ""), draft.get("text", ""))
         if not draft.get("send_fingerprint"):
             self._storage.set_draft_fingerprint(draft_id, draft["version"], fingerprint)
             draft["send_fingerprint"] = fingerprint
 
         def _before_send():
-            self._write_draft_status(draft_id, int(draft["version"]), "sending", int(draft["version"]))
+            if self._window_validator is None:
+                raise SendBlocked("backend window validator is not configured")
+            if not self._window_validator(str(draft["chat_id"]), str(draft.get("group_name", ""))):
+                raise SendBlocked("current WeChat window does not match target group")
+            return self._storage.claim_draft_for_sending(draft_id, int(draft["version"]))
 
         try:
             payload = self._safe_sender.send(
@@ -406,8 +452,8 @@ class ClassAssistantService:
         return payload
 
     @staticmethod
-    def _fingerprint(text: str) -> str:
-        return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+    def _fingerprint(chat_id: str, text: str) -> str:
+        return hashlib.sha256(f"{chat_id}\0{text}".encode("utf-8")).hexdigest()
 
     def _sent_fingerprints(self) -> set[str]:
         rows = self._storage.query("audit_events", action="sent")
@@ -432,6 +478,7 @@ class ClassAssistantService:
             "enabled": self._enabled("collection") or self._enabled("analysis"),
             "collection_enabled": self._enabled("collection"),
             "analysis_enabled": self._enabled("analysis"),
+            "review_queue_enabled": bool(getattr(self.config, "class_assistant_review_queue_enabled", True)),
             "real_send_enabled": bool(getattr(self.config, "class_assistant_real_send_enabled", False)),
             "dry_run": self._send_guard.dry_run,
             "groups": sorted(self._whitelist.chat_ids),
@@ -478,3 +525,27 @@ class ClassAssistantService:
         """Stop scheduling and permanently block collection for this process."""
         self._emergency_stopped = True
         self.stop()
+
+    def reconcile_draft(self, draft_id: str, version: int, outcome: str, actor: str = "local") -> dict[str, Any]:
+        """Resolve a crashed/uncertain send without automatically retrying."""
+        draft = self._latest_draft(draft_id)
+        if draft is None or int(draft["version"]) != int(version):
+            raise ValueError("draft version is not the latest version")
+        if draft["status"] != "sending":
+            raise ValueError("only a sending draft can be reconciled")
+        if outcome == "sent":
+            status = "sent"
+            action = "reconciled_sent"
+        elif outcome in {"failed", "unsent"}:
+            status = "needs_reconciliation"
+            action = "reconciled_failed"
+        else:
+            raise ValueError("outcome must be sent or failed")
+        result = self._write_draft_status(draft_id, version, status, version)
+        self._storage.insert_audit({"draft_id": draft_id, "action": action, "actor": actor, "details": f"version={version}"})
+        return result
+
+    def close(self) -> None:
+        """Stop scheduling and release the assistant's dedicated DB handle."""
+        self.stop()
+        self._storage.close()

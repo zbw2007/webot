@@ -34,7 +34,9 @@ class SendGuard:
             if confirmation_token not in self._confirmation_tokens:
                 raise SendBlocked("confirmation token is required")
             self._confirmation_tokens.remove(confirmation_token)
-        fingerprint = draft.get("send_fingerprint") or hashlib.sha256(draft.get("text", "").encode()).hexdigest()
+        fingerprint = draft.get("send_fingerprint") or hashlib.sha256(
+            f"{target_chat_id}\0{draft.get('text', '')}".encode("utf-8")
+        ).hexdigest()
         if fingerprint in sent_fingerprints:
             raise SendBlocked("duplicate send fingerprint")
         return True

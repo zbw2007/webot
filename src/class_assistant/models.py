@@ -19,7 +19,7 @@ class Todo:
     def __post_init__(self):
         if not self.title.strip():
             raise ValueError("todo title cannot be empty")
-        if self.due_confidence not in {"high", "medium", "low", "unknown"}:
+        if self.due_confidence not in {"high", "medium", "low", "unknown", "needs_confirmation"}:
             raise ValueError("invalid due confidence")
 
 
@@ -37,4 +37,3 @@ class ReplyDraft:
             raise ValueError("draft id, chat id and text are required")
         if self.version < 1:
             raise ValueError("draft version must be positive")
-
