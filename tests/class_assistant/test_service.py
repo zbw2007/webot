@@ -252,3 +252,12 @@ def test_real_send_requires_backend_window_validation(tmp_path):
     with pytest.raises(ValueError, match="window"):
         service.send_draft("draft-window", version=1, confirmation_token=service.issue_confirmation_token())
     assert storage.query("reply_drafts", status="approved")
+
+
+def test_disabled_group_whitelist_row_blocks_collection(tmp_path):
+    storage = Storage(str(tmp_path / "assistant.db"))
+    service = ClassAssistantService(Config(), storage=storage)
+    storage.conn.execute("UPDATE group_whitelist SET enabled=0 WHERE chat_id=?", ("class@chatroom",))
+    storage.conn.commit()
+    service.handle(message("disabled"))
+    assert storage.count_messages() == 0

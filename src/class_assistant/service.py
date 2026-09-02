@@ -88,6 +88,13 @@ class ClassAssistantService:
     def storage(self) -> Storage:
         return self._storage
 
+    def _group_allowed(self, chat_id: Any, is_group: bool) -> bool:
+        """Apply both the immutable config whitelist and DB enable flag."""
+        if not self._whitelist.allows(chat_id, is_group):
+            return False
+        rows = self._storage.query("group_whitelist", chat_id=str(chat_id))
+        return not rows or bool(rows[0]["enabled"])
+
     def _enabled(self, kind: str) -> bool:
         if not bool(getattr(self.config, "class_assistant_enabled", False)):
             return False
@@ -123,7 +130,7 @@ class ClassAssistantService:
         except ValueError:
             logger.warning("Ignoring malformed class-assistant message")
             return None
-        if not self._whitelist.allows(message.get("chat_id"), bool(message.get("is_group", False))):
+        if not self._group_allowed(message.get("chat_id"), bool(message.get("is_group", False))):
             return None
         try:
             expires_at = int(self._clock()) + int(getattr(self.config, "raw_message_retention_days", 7)) * 86400
@@ -135,7 +142,7 @@ class ClassAssistantService:
 
     def is_in_scope(self, message: Mapping[str, Any]) -> bool:
         """Return whether a message belongs to this assistant's collection scope."""
-        return not self._emergency_stopped and self._enabled("collection") and self._whitelist.allows(
+        return not self._emergency_stopped and self._enabled("collection") and self._group_allowed(
             message.get("chat_id"), bool(message.get("is_group", False))
         )
 
@@ -200,6 +207,7 @@ class ClassAssistantService:
             dict(row)
             for row in sorted(rows, key=lambda row: (int(row["timestamp"]), str(row["message_id"])))
             if row["chat_id"] in allowed
+            and self._group_allowed(row["chat_id"], True)
             and (int(row["timestamp"]), str(row["message_id"])) > self._storage.get_analysis_cursor(row["chat_id"])
         ]
 
