@@ -335,6 +335,12 @@ class WcdbBackend(AbstractWeChatBackend):
                     # Direct lookup: maybe group_name IS a username like 20968749111@chatroom
                     if group_name in all_chatrooms:
                         self._talker_ids[group_name] = group_name
+                        # Keep the stable chat_id as the polling key while
+                        # also retaining the human-readable title for window
+                        # validation and keyboard navigation.
+                        display = all_chatrooms[group_name]["name"]
+                        if display and display != group_name:
+                            self._talker_ids[display] = group_name
                         logger.info("Resolved '%s' as direct username", group_name)
                     else:
                         logger.warning(
@@ -411,10 +417,14 @@ class WcdbBackend(AbstractWeChatBackend):
             logger.warning("Failed to persist group_names.json: %s", e)
 
     def _talker_to_name(self, talker_id: str) -> str:
+        fallback = ""
         for name, tid in self._talker_ids.items():
             if tid == talker_id:
-                return name
-        return ""
+                if not fallback:
+                    fallback = name
+                if name != talker_id:
+                    return name
+        return fallback
 
     # ── Message polling ──────────────────────────────────────────────
 

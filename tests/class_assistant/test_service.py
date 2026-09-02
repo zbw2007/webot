@@ -231,3 +231,24 @@ def test_real_send_claim_is_atomic_and_reconcile_is_explicit(tmp_path):
     assert service.send_draft("draft-claim", version=1, confirmation_token=token)["sent"] is True
     with pytest.raises(ValueError):
         service.reconcile_draft("draft-claim", 1, "sent")
+
+
+def test_real_send_requires_backend_window_validation(tmp_path):
+    storage = Storage(str(tmp_path / "assistant.db"))
+    config = Config()
+    config.class_assistant_dry_run = False
+    config.class_assistant_real_send_enabled = True
+    service = ClassAssistantService(
+        config,
+        storage=storage,
+        sender=lambda _chat, _text: pytest.fail("sender must not be called"),
+        window_validator=lambda _chat, _group: False,
+    )
+    storage.insert_reply_draft({
+        "id": "draft-window", "version": 1, "chat_id": "class@chatroom",
+        "group_name": "Class", "text": "收到", "status": "approved", "approved_version": 1,
+        "risk_level": "low",
+    })
+    with pytest.raises(ValueError, match="window"):
+        service.send_draft("draft-window", version=1, confirmation_token=service.issue_confirmation_token())
+    assert storage.query("reply_drafts", status="approved")
