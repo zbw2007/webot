@@ -16,7 +16,7 @@ from hashlib import sha1
 from base64 import b64encode
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit, parse_qs
 
 # Re-exported from config.py for use in API handlers.
 # NOTE: _decode_wechat_groups is also imported inside _handle_request()
@@ -812,6 +812,7 @@ _env_write_lock = threading.Lock()  # serialize all .env writes across threads
 _server_guard = _ServerStartGuard()
 _shutdown_event = threading.Event()
 _voice_downloads: dict[str, dict] = {}  # model → {active, msg}
+_class_assistant_service = None
 
 
 def signal_shutdown():
@@ -875,9 +876,29 @@ def _register_backend(backend):
     _bot_control.register_backend(backend)
 
 
+def register_class_assistant_service(service):
+    """Register the optional class-assistant service for local API access."""
+    global _class_assistant_service
+    _class_assistant_service = service
+    try:
+        update_status(class_assistant=service.status() if service is not None else None)
+    except Exception:
+        logger.exception("Failed to publish class-assistant status")
+
+
+def _get_class_assistant_service():
+    return _class_assistant_service
+
+
 def _stop_bot():
     """Stop the running bot backend. Returns True if anything was stopped."""
     stopped = _bot_control.stop()
+    service = _get_class_assistant_service()
+    if service is not None:
+        try:
+            service.stop()
+        except Exception:
+            logger.exception("Failed to stop class-assistant scheduler")
     update_status(running=False)
     if stopped:
         logger.info("Bot stopped via web API")
@@ -1028,6 +1049,14 @@ class _UIHandler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Max-Age", "86400")
         self.end_headers()
 
+    def _json_body(self) -> dict:
+        content_len = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(content_len) if content_len else b"{}"
+        value = json.loads(body)
+        if not isinstance(value, dict):
+            raise ValueError("JSON body must be an object")
+        return value
+
     def do_POST(self):
         # Only delegate specific API paths; return 405 for unknown POST paths
         if self.path in ("/api/config", "/api/config/import", "/api/start", "/api/stop",
@@ -1040,7 +1069,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
                          "/api/lots",
                          "/api/todos/action",
                          "/api/voice/download-model",
-                         "/api/wechat-data-dir/detect"):
+                         "/api/wechat-data-dir/detect") or self.path.startswith("/api/class-assistant/"):
             self.do_GET()
         else:
             self.send_response(405)
@@ -1050,6 +1079,88 @@ class _UIHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         self._handle_request()
+
+    def _handle_class_assistant_request(self):
+        """Serve the local, approval-gated class-assistant API."""
+        service = _get_class_assistant_service()
+        parsed = urlsplit(self.path)
+        path = parsed.path.rstrip("/")
+        if service is None:
+            self.send_json({"ok": False, "error": "class assistant is not running"})
+            return
+        try:
+            if path == "/api/class-assistant/status" and self.command == "GET":
+                self.send_json({"ok": True, "status": service.status()})
+                return
+            if path == "/api/class-assistant/token" and self.command == "POST":
+                self.send_json({"ok": True, "confirmation_token": service.issue_confirmation_token()})
+                return
+            if path == "/api/class-assistant/stop" and self.command == "POST":
+                service.emergency_stop()
+                self.send_json({"ok": True, "status": service.status()})
+                return
+            if path == "/api/class-assistant/digests" and self.command == "GET":
+                self.send_json({"ok": True, "items": service.list_records("digest_runs")})
+                return
+            if path == "/api/class-assistant/todos" and self.command == "GET":
+                filters = {}
+                query = parse_qs(parsed.query)
+                if query.get("status"):
+                    filters["status"] = query["status"][0]
+                if query.get("group_id"):
+                    filters["group_id"] = query["group_id"][0]
+                self.send_json({"ok": True, "items": service.list_records("todo_items", **filters)})
+                return
+            if path == "/api/class-assistant/drafts" and self.command == "GET":
+                filters = {}
+                query = parse_qs(parsed.query)
+                if query.get("status"):
+                    filters["status"] = query["status"][0]
+                self.send_json({"ok": True, "items": service.list_records("reply_drafts", **filters)})
+                return
+            if path == "/api/class-assistant/groups" and self.command == "GET":
+                groups = service.list_records("group_whitelist")
+                if not groups:
+                    groups = [{"chat_id": chat_id, "display_name": "", "enabled": 1} for chat_id in service.whitelist.chat_ids]
+                self.send_json({"ok": True, "items": groups})
+                return
+            if path == "/api/class-assistant/audit" and self.command == "GET":
+                self.send_json({"ok": True, "items": service.list_records("audit_events")})
+                return
+
+            prefix = "/api/class-assistant/drafts/"
+            if path.startswith(prefix):
+                parts = [unquote(part) for part in path[len(prefix):].split("/") if part]
+                if len(parts) < 2:
+                    raise ValueError("invalid draft endpoint")
+                draft_id, action = "/".join(parts[:-1]), parts[-1]
+                data = self._json_body() if self.command == "POST" else {}
+                if action == "approve" and self.command == "POST":
+                    result = service.approve_draft(draft_id, int(data["version"]), str(data.get("actor", "local")))
+                elif action == "reject" and self.command == "POST":
+                    result = service.reject_draft(draft_id, int(data["version"]), str(data.get("actor", "local")))
+                elif action == "edit" and self.command == "POST":
+                    result = service.edit_draft(draft_id, str(data.get("text", "")), str(data.get("actor", "local")))
+                elif action == "send" and self.command == "POST":
+                    if "version" not in data or not data.get("confirmation_token"):
+                        raise ValueError("version and confirmation_token are required")
+                    result = service.send_draft(
+                        draft_id,
+                        version=int(data["version"]),
+                        confirmation_token=str(data["confirmation_token"]),
+                        target_group_name=data.get("target_group_name"),
+                        current_window=data.get("current_window"),
+                    )
+                else:
+                    raise ValueError("unsupported draft action")
+                self.send_json({"ok": True, "item": result})
+                return
+            raise ValueError("unknown class-assistant endpoint")
+        except (KeyError, TypeError, ValueError) as exc:
+            self.send_json({"ok": False, "error": str(exc)})
+        except Exception as exc:
+            logger.exception("Class-assistant API request failed")
+            self.send_json({"ok": False, "error": str(exc)})
 
     def _handle_request(self):
         # ── WebSocket upgrade ─────────────────────────────────────────
@@ -1096,6 +1207,11 @@ class _UIHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/stop":
             _stop_bot()
             self.send_json({"ok": True})
+            return
+
+        # ── API: Class-assistant status and review queue ─────────────
+        if self.path.startswith("/api/class-assistant"):
+            self._handle_class_assistant_request()
             return
 
         # ── API: Load config ───────────────────────────────────────────
@@ -1200,8 +1316,20 @@ class _UIHandler(SimpleHTTPRequestHandler):
                         if kw.strip()
                     ],
                     "log_level": raw.get("LOG_LEVEL", "INFO"),
-                    "wechat_data_dir": raw.get("WECHAT_DATA_DIR", ""),
-                }
+                "wechat_data_dir": raw.get("WECHAT_DATA_DIR", ""),
+                "class_assistant_enabled": _bool_env(raw.get("CLASS_ASSISTANT_ENABLED", "false"), False),
+                "class_assistant_groups": _split_csv(raw.get("CLASS_ASSISTANT_GROUPS", "")),
+                "collection_enabled": _bool_env(raw.get("COLLECTION_ENABLED", "false"), False),
+                "analysis_enabled": _bool_env(raw.get("ANALYSIS_ENABLED", "false"), False),
+                "review_queue_enabled": _bool_env(raw.get("REVIEW_QUEUE_ENABLED", "true"), True),
+                "real_send_enabled": _bool_env(raw.get("REAL_SEND_ENABLED", "false"), False),
+                "dry_run": _bool_env(raw.get("DRY_RUN", "true"), True),
+                "timezone": raw.get("TIMEZONE", "Asia/Shanghai"),
+                "digest_schedule": raw.get("DIGEST_SCHEDULE", "08:00,20:00"),
+                "raw_message_retention_days": _int_env(raw.get("RAW_MESSAGE_RETENTION_DAYS", "7"), 7),
+                "draft_retention_days": _int_env(raw.get("DRAFT_RETENTION_DAYS", "30"), 30),
+                "audit_retention_days": _int_env(raw.get("AUDIT_RETENTION_DAYS", "30"), 30),
+            }
                 export_data.update(_feishu_config_from_raw(raw))
                 filename = f"webot-config-{_dt_date.today().isoformat()}.json"
                 body = json.dumps(export_data, ensure_ascii=False, indent=2).encode("utf-8")
@@ -1264,6 +1392,18 @@ class _UIHandler(SimpleHTTPRequestHandler):
                     "VOICE_OPENAI_API_KEY": config.get("voice_openai_api_key", ""),
                     "VOICE_OPENAI_BASE_URL": config.get("voice_openai_base_url", ""),
                     "VOICE_LOCAL_MODEL": config.get("voice_local_model", "small"),
+                    "CLASS_ASSISTANT_ENABLED": str(config.get("class_assistant_enabled", False)).lower(),
+                    "CLASS_ASSISTANT_GROUPS": ",".join(config.get("class_assistant_groups", [])) if isinstance(config.get("class_assistant_groups", []), list) else str(config.get("class_assistant_groups", "")),
+                    "COLLECTION_ENABLED": str(config.get("collection_enabled", False)).lower(),
+                    "ANALYSIS_ENABLED": str(config.get("analysis_enabled", False)).lower(),
+                    "REVIEW_QUEUE_ENABLED": str(config.get("review_queue_enabled", True)).lower(),
+                    "REAL_SEND_ENABLED": str(config.get("real_send_enabled", False)).lower(),
+                    "DRY_RUN": str(config.get("dry_run", True)).lower(),
+                    "TIMEZONE": config.get("timezone", "Asia/Shanghai"),
+                    "DIGEST_SCHEDULE": config.get("digest_schedule", "08:00,20:00"),
+                    "RAW_MESSAGE_RETENTION_DAYS": str(config.get("raw_message_retention_days", 7)),
+                    "DRAFT_RETENTION_DAYS": str(config.get("draft_retention_days", 30)),
+                    "AUDIT_RETENTION_DAYS": str(config.get("audit_retention_days", 30)),
                 }
                 updates.update(_feishu_updates_from_config(config))
                 updates.update(_todo_updates_from_config(config))

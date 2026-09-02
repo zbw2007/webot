@@ -21,6 +21,8 @@ from .admin import AdminCommandHandler
 from .router import MessageRouter
 from .integrations.feishu import FeishuExportService
 from .utils.logging_config import setup_logging
+from .class_assistant.service import ClassAssistantService
+from .class_assistant.storage import Storage as ClassAssistantStorage
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +190,7 @@ class Bot:
         self._conn = None
         self._backend = None
         self._health: HealthMonitor | None = None
+        self._class_assistant: ClassAssistantService | None = None
 
     def run(self) -> None:
         """Initialize all components and start the bot. Blocks until stopped."""
@@ -253,6 +256,30 @@ class Bot:
         self._backend = backend
         self.backend = backend   # public ref for lifecycle control
 
+        # Optional whitelist-only class-assistant pipeline.  In-scope class
+        # messages bypass the legacy router so they cannot trigger an
+        # automatic model reply or send; they are collected for later review.
+        callback = router.handle
+        if getattr(config, "class_assistant_enabled", False):
+            self._class_assistant = ClassAssistantService(
+                config,
+                storage=ClassAssistantStorage(config.db_path),
+                summarizer=summarizer,
+                sender=backend.send_text,
+            )
+            self._class_assistant.start()
+            try:
+                from .web.server import register_class_assistant_service
+                register_class_assistant_service(self._class_assistant)
+            except Exception:
+                logger.exception("Could not register class-assistant service with Web UI")
+
+            def callback(message):
+                if self._class_assistant and self._class_assistant.is_in_scope(message):
+                    self._class_assistant.handle(message)
+                    return None
+                return router.handle(message)
+
         # Register backend with web server for stop/restart (explicit
         # API — no monkey-patching needed).
         try:
@@ -303,12 +330,14 @@ class Bot:
         #   The old comment is archived in AUDIT.md §C1.
         try:
             logger.info("Bot is running. Press Ctrl+C to stop.")
-            backend.start(router.handle)
+            backend.start(callback)
         except KeyboardInterrupt:
             pass
         finally:
             if self._health:
                 self._health.stop()
+            if self._class_assistant:
+                self._class_assistant.stop()
             if self._conn is not None:
                 self._conn.close()
             if hasattr(self, 'backend') and hasattr(self.backend, 'router'):

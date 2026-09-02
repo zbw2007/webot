@@ -176,6 +176,12 @@ class BotConfig:
     class_assistant_analysis_enabled: bool = False
     class_assistant_dry_run: bool = True
     class_assistant_groups: list[str] = field(default_factory=list)
+    class_assistant_review_queue_enabled: bool = True
+    class_assistant_digest_schedule: str = "08:00,20:00"
+    timezone: str = "Asia/Shanghai"
+    raw_message_retention_days: int = 7
+    draft_retention_days: int = 30
+    audit_retention_days: int = 30
 
     # === Bot Identity ===
     bot_display_name: str = "群聊小助手"
@@ -318,6 +324,18 @@ def _validate_config(kwargs: dict) -> None:
         errors.append("CLASS_ASSISTANT_GROUPS values must be non-empty")
     if "*" in {str(group).strip() for group in assistant_groups}:
         errors.append("CLASS_ASSISTANT_GROUPS must not contain '*'")
+
+    schedule = str(kwargs.get("class_assistant_digest_schedule", "08:00,20:00"))
+    slots = [part.strip() for part in schedule.split(",") if part.strip()]
+    if slots != ["08:00", "20:00"]:
+        errors.append("DIGEST_SCHEDULE must be exactly '08:00,20:00'")
+    for key, label in (
+        ("raw_message_retention_days", "RAW_MESSAGE_RETENTION_DAYS"),
+        ("draft_retention_days", "DRAFT_RETENTION_DAYS"),
+        ("audit_retention_days", "AUDIT_RETENTION_DAYS"),
+    ):
+        if int(kwargs.get(key, 0)) < 0:
+            errors.append(f"{label} must be >= 0")
 
     # poll_interval_sec
     poll_interval_sec = kwargs.get("poll_interval_sec", 1.0)
@@ -496,12 +514,18 @@ def load_config() -> BotConfig:
         "wechat_data_dir": os.getenv("WECHAT_DATA_DIR", "").strip(),
         "class_assistant_collect_enabled": os.getenv("CLASS_ASSISTANT_COLLECT_ENABLED", "false").strip().lower() == "true",
         "class_assistant_analyze_enabled": os.getenv("CLASS_ASSISTANT_ANALYZE_ENABLED", "false").strip().lower() == "true",
-        "class_assistant_real_send_enabled": os.getenv("CLASS_ASSISTANT_REAL_SEND_ENABLED", "false").strip().lower() == "true",
+        "class_assistant_real_send_enabled": os.getenv("CLASS_ASSISTANT_REAL_SEND_ENABLED", os.getenv("REAL_SEND_ENABLED", "false")).strip().lower() == "true",
         "class_assistant_enabled": os.getenv("CLASS_ASSISTANT_ENABLED", "false").strip().lower() == "true",
-        "class_assistant_collection_enabled": os.getenv("CLASS_ASSISTANT_COLLECTION_ENABLED", os.getenv("CLASS_ASSISTANT_COLLECT_ENABLED", "false")).strip().lower() == "true",
-        "class_assistant_analysis_enabled": os.getenv("CLASS_ASSISTANT_ANALYSIS_ENABLED", os.getenv("CLASS_ASSISTANT_ANALYZE_ENABLED", "false")).strip().lower() == "true",
-        "class_assistant_dry_run": os.getenv("CLASS_ASSISTANT_DRY_RUN", "true").strip().lower() == "true",
+        "class_assistant_collection_enabled": os.getenv("CLASS_ASSISTANT_COLLECTION_ENABLED", os.getenv("CLASS_ASSISTANT_COLLECT_ENABLED", os.getenv("COLLECTION_ENABLED", "false"))).strip().lower() == "true",
+        "class_assistant_analysis_enabled": os.getenv("CLASS_ASSISTANT_ANALYSIS_ENABLED", os.getenv("CLASS_ASSISTANT_ANALYZE_ENABLED", os.getenv("ANALYSIS_ENABLED", "false"))).strip().lower() == "true",
+        "class_assistant_dry_run": os.getenv("CLASS_ASSISTANT_DRY_RUN", os.getenv("DRY_RUN", "true")).strip().lower() == "true",
         "class_assistant_groups": [g.strip() for g in os.getenv("CLASS_ASSISTANT_GROUPS", "").split(",") if g.strip()],
+        "class_assistant_review_queue_enabled": os.getenv("REVIEW_QUEUE_ENABLED", "true").strip().lower() == "true",
+        "class_assistant_digest_schedule": os.getenv("DIGEST_SCHEDULE", "08:00,20:00").strip(),
+        "timezone": os.getenv("TIMEZONE", "Asia/Shanghai").strip(),
+        "raw_message_retention_days": _safe_int(os.getenv("RAW_MESSAGE_RETENTION_DAYS", "7"), 7, "RAW_MESSAGE_RETENTION_DAYS"),
+        "draft_retention_days": _safe_int(os.getenv("DRAFT_RETENTION_DAYS", "30"), 30, "DRAFT_RETENTION_DAYS"),
+        "audit_retention_days": _safe_int(os.getenv("AUDIT_RETENTION_DAYS", "30"), 30, "AUDIT_RETENTION_DAYS"),
         "bot_display_name": _sanitize_display_name(os.getenv("BOT_DISPLAY_NAME", "群聊小助手")),
         "admin_wxid": os.getenv("ADMIN_WXID", "").strip(),
         "db_path": os.getenv("DB_PATH", "data/messages.db").strip(),

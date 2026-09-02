@@ -1,5 +1,32 @@
 import json
 
+try:  # Optional at import time so read-only collection works without clients.
+    from pydantic import BaseModel, ConfigDict, Field
+except ImportError:  # pragma: no cover - exercised only in minimal installs
+    BaseModel = None
+
+
+if BaseModel is not None:
+    class _TodoPayload(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        title: str
+        due_at: str | None = None
+        due_confidence: str = "unknown"
+        group_id: str | None = None
+        source_message_id: str | None = None
+
+    class _ReplyPayload(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        text: str
+        risk_level: str = "low"
+        source_message_id: str | None = None
+
+    class _AnalysisPayload(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        summary: str = ""
+        todos: list[_TodoPayload] = Field(default_factory=list)
+        reply_candidates: list[_ReplyPayload] = Field(default_factory=list)
+
 
 class AnalysisError(ValueError):
     pass
@@ -13,6 +40,11 @@ def analyze(messages, call_model):
         raise AnalysisError("model returned invalid JSON") from exc
     if not isinstance(result, dict) or set(result) - {"todos", "reply_candidates", "summary"}:
         raise AnalysisError("analysis schema invalid")
+    if BaseModel is not None:
+        try:
+            return _AnalysisPayload.model_validate(result).model_dump(exclude_none=True)
+        except Exception as exc:
+            raise AnalysisError("analysis schema invalid") from exc
     if not isinstance(result.get("todos"), list) or not isinstance(result.get("reply_candidates"), list):
         raise AnalysisError("analysis schema invalid")
     for todo in result["todos"]:

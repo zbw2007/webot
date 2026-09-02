@@ -57,7 +57,7 @@ def test_send_guard_requires_approval_and_dry_run():
 def test_storage_retention_and_collector_cursor(tmp_path):
     s = Storage(str(tmp_path / "db.sqlite"))
     s.insert_message({"message_id": "1", "chat_id": "g", "group_name": "G", "sender_id": "u", "sender_name": "U", "content": "x", "msg_type": 1, "timestamp": 1})
-    s.insert_message({"message_id": "old", "chat_id": "g", "group_name": "G", "sender_id": "u", "sender_name": "U", "content": "x", "msg_type": 1, "timestamp": 1}, expires_at=1)
+    s.insert_message({"message_id": "old", "chat_id": "g", "group_name": "G", "sender_id": "u", "sender_name": "U", "content": "old", "msg_type": 1, "timestamp": 1}, expires_at=1)
     assert s.count_messages() == 2
     assert s.cleanup(now=2, raw_days=7) == 1
     rows = [{"message_id": str(i), "chat_id": "g", "group_name": "G", "sender_id": "u", "sender_name": "U", "content": str(i), "msg_type": 1, "timestamp": i} for i in range(1, 4)]

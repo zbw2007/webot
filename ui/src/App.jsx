@@ -8,6 +8,7 @@ import NicknameEditor from './components/NicknameEditor'
 import LogViewer from './components/LogViewer'
 import TodoManager from './components/TodoManager'
 import Onboarding from './components/Onboarding'
+import ClassAssistantPanel from './components/ClassAssistantPanel'
 
 const iconVariants = {
   hover: { y: -1.5, scale: 1.05, transition: { type: 'spring', stiffness: 300, damping: 15 } }
@@ -39,6 +40,7 @@ const TABS = [
   },
   { id: 'nicknames', label: '群友昵称', icon: Users },
   { id: 'todo-manager', label: '群聊待办', icon: CheckSquare },
+  { id: 'class-assistant', label: '班级事务助手', icon: CheckSquare },
   { id: 'logs', label: '运行日志', icon: Scroll },
 ]
 
@@ -291,6 +293,7 @@ export default function App() {
             {activeTab === 'features' && <FeaturesPanel activeSection={featuresSection} onNavigate={setFeaturesSection} />}
             {activeTab === 'nicknames' && <NicknameEditor />}
             {activeTab === 'todo-manager' && <TodoManager />}
+            {activeTab === 'class-assistant' && <ClassAssistantPanel />}
             {activeTab === 'logs' && <LogViewer />}
           </motion.div>
         </AnimatePresence>
