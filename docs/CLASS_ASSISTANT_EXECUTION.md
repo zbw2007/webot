@@ -29,6 +29,8 @@ python -m compileall -q src tests -> 0
 pip check -> No broken requirements found.
 ```
 
+附加基线运行（排除当前 Windows 环境不适用的 `test_window_controller.py`）结果为 `359 passed, 42 failed, 11 skipped`；失败集中在上游既有 `MAX_RETRIES`/Feishu 断言和浅克隆缺失的 macOS 工具文件，班级助手专项测试全部通过。
+
 上游全量测试仍有与本功能无关的既有失败：`MAX_RETRIES` 校验、Feishu secret 展示断言，以及浅克隆缺少 macOS 工具文件导致的测试失败。没有修改这些基线问题。
 
 前端 `npm install` 已使用 npmjs 与 npmmirror/清华镜像多次尝试，均因网络长时间无响应而中止；当前没有 `ui/node_modules`，所以尚未生成 `ui/dist`，也没有宣称前端构建通过。
