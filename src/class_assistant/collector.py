@@ -7,7 +7,7 @@ class ReadOnlyCollector:
         self.storage = storage
         self.whitelist = whitelist
         self.page_size = page_size
-        self.cursor = 0
+        self.cursor = (0, "")
         self.dedup = Deduplicator()
 
     def poll(self):
@@ -16,10 +16,10 @@ class ReadOnlyCollector:
             if not page:
                 return self.cursor
             for message in page:
+                position = (int(message["timestamp"]), str(message["message_id"]))
                 if not self.whitelist.allows(message.get("chat_id"), message.get("is_group", True)):
-                    self.cursor = max(self.cursor, int(message.get("timestamp", self.cursor)))
+                    self.cursor = max(self.cursor, position)
                     continue
                 if self.dedup.accept(message):
                     self.storage.insert_message(message)
-                self.cursor = max(self.cursor, int(message["timestamp"]))
-
+                self.cursor = max(self.cursor, position)

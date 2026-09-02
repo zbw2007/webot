@@ -167,6 +167,16 @@ class BotConfig:
     # Set to the parent directory containing wxid_* folders (e.g. D:\WeChatData).
     wechat_data_dir: str = ""
 
+    # === Class assistant safety core ===
+    class_assistant_collect_enabled: bool = False
+    class_assistant_analyze_enabled: bool = False
+    class_assistant_real_send_enabled: bool = False
+    class_assistant_enabled: bool = False
+    class_assistant_collection_enabled: bool = False
+    class_assistant_analysis_enabled: bool = False
+    class_assistant_dry_run: bool = True
+    class_assistant_groups: list[str] = field(default_factory=list)
+
     # === Bot Identity ===
     bot_display_name: str = "群聊小助手"
     # Admin wxid (can manage nicknames and bot settings)
@@ -302,6 +312,12 @@ def _safe_int(raw: str, default: int, label: str) -> int:
 def _validate_config(kwargs: dict) -> None:
     """Validate numeric config values.  Prints clear errors and exits on bad values."""
     errors: list[str] = []
+
+    assistant_groups = kwargs.get("class_assistant_groups", [])
+    if any(not str(group).strip() for group in assistant_groups):
+        errors.append("CLASS_ASSISTANT_GROUPS values must be non-empty")
+    if "*" in {str(group).strip() for group in assistant_groups}:
+        errors.append("CLASS_ASSISTANT_GROUPS must not contain '*'")
 
     # poll_interval_sec
     poll_interval_sec = kwargs.get("poll_interval_sec", 1.0)
@@ -478,6 +494,14 @@ def load_config() -> BotConfig:
         "wechat_backend": os.getenv("WECHAT_BACKEND", "wcdb").strip(),
         "wechat_groups": _decode_wechat_groups(os.getenv("WECHAT_GROUPS", "*")),
         "wechat_data_dir": os.getenv("WECHAT_DATA_DIR", "").strip(),
+        "class_assistant_collect_enabled": os.getenv("CLASS_ASSISTANT_COLLECT_ENABLED", "false").strip().lower() == "true",
+        "class_assistant_analyze_enabled": os.getenv("CLASS_ASSISTANT_ANALYZE_ENABLED", "false").strip().lower() == "true",
+        "class_assistant_real_send_enabled": os.getenv("CLASS_ASSISTANT_REAL_SEND_ENABLED", "false").strip().lower() == "true",
+        "class_assistant_enabled": os.getenv("CLASS_ASSISTANT_ENABLED", "false").strip().lower() == "true",
+        "class_assistant_collection_enabled": os.getenv("CLASS_ASSISTANT_COLLECTION_ENABLED", os.getenv("CLASS_ASSISTANT_COLLECT_ENABLED", "false")).strip().lower() == "true",
+        "class_assistant_analysis_enabled": os.getenv("CLASS_ASSISTANT_ANALYSIS_ENABLED", os.getenv("CLASS_ASSISTANT_ANALYZE_ENABLED", "false")).strip().lower() == "true",
+        "class_assistant_dry_run": os.getenv("CLASS_ASSISTANT_DRY_RUN", "true").strip().lower() == "true",
+        "class_assistant_groups": [g.strip() for g in os.getenv("CLASS_ASSISTANT_GROUPS", "").split(",") if g.strip()],
         "bot_display_name": _sanitize_display_name(os.getenv("BOT_DISPLAY_NAME", "群聊小助手")),
         "admin_wxid": os.getenv("ADMIN_WXID", "").strip(),
         "db_path": os.getenv("DB_PATH", "data/messages.db").strip(),

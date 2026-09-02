@@ -16,7 +16,10 @@ def test_whitelist_requires_explicit_group_and_rejects_private():
     wl = GroupWhitelist(["room@chatroom"])
     assert wl.allows("room@chatroom", True)
     assert not wl.allows("someone", False)
-    assert not GroupWhitelist(["*"]).allows("room@chatroom", True)
+    with pytest.raises(ValueError):
+        GroupWhitelist(["*"])
+    with pytest.raises(ValueError):
+        GroupWhitelist([""])
 
 
 def test_dedup_uses_id_and_content_fingerprint():
@@ -61,8 +64,25 @@ def test_storage_retention_and_collector_cursor(tmp_path):
     calls = []
     def fetch(cursor, limit):
         calls.append(cursor)
-        return [r for r in rows if r["timestamp"] > cursor][:limit]
+        return [r for r in rows if (r["timestamp"], r["message_id"]) > tuple(cursor)][:limit]
     c = ReadOnlyCollector(fetch, s, GroupWhitelist(["g"]), page_size=2)
-    assert c.poll() == 3
-    assert c.cursor == 3
-    assert calls == [0, 2, 3]
+    assert c.poll() == (3, "3")
+    assert c.cursor == (3, "3")
+    assert calls == [(0, ""), (2, "2"), (3, "3")]
+
+
+def test_collector_compound_cursor_does_not_skip_same_timestamp(tmp_path):
+    s = Storage(str(tmp_path / "db.sqlite"))
+    rows = [
+        {"message_id": "a", "chat_id": "private", "is_group": False, "content": "x", "timestamp": 10},
+        {"message_id": "b", "chat_id": "g", "is_group": True, "content": "y", "timestamp": 10},
+    ]
+    calls = []
+    def fetch(cursor, limit):
+        calls.append(cursor)
+        return [r for r in rows if (r["timestamp"], r["message_id"]) > tuple(cursor)][:limit]
+    c = ReadOnlyCollector(fetch, s, GroupWhitelist(["g"]), page_size=1)
+    c.poll()
+    assert c.cursor == (10, "b")
+    assert s.count_messages() == 1
+    assert calls[0] == (0, "")
