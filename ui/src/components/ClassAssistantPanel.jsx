@@ -141,7 +141,7 @@ export default function ClassAssistantPanel() {
 
       <section className="p-5 rounded-xl bg-bg-raised border border-border-main">
         <h4 className="font-semibold text-text-main mb-3">待办清单</h4>
-        {todos.length === 0 ? <p className="text-sm text-text-muted">暂无待办</p> : <div className="space-y-2">{todos.map(todo => <div key={todo.id} className="flex justify-between gap-3 text-sm"><span className="text-text-main">{todo.title}</span><span className="text-text-muted">{todo.due_at || `待确认日期（${todo.due_confidence || 'unknown'}）`}</span></div>)}</div>}
+        {todos.length === 0 ? <p className="text-sm text-text-muted">暂无待办</p> : <div className="space-y-2">{todos.map(todo => <div key={todo.id} className="flex justify-between gap-3 text-sm"><span className="text-text-main">{todo.title}{todo.location ? ` · ${todo.location}` : ''}{todo.assignee ? ` · ${todo.assignee}` : ''}</span><span className="text-text-muted">{todo.due_at || `待确认日期（${todo.due_confidence || 'unknown'}）`}</span></div>)}</div>}
       </section>
 
       <section className="p-5 rounded-xl bg-bg-raised border border-border-main">

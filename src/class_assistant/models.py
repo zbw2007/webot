@@ -13,6 +13,9 @@ def require_message(message: Mapping[str, Any]) -> None:
 class Todo:
     title: str
     source_message_ids: tuple[str, ...] = ()
+    description: str = ""
+    location: str = ""
+    assignee: str = ""
     due_at: str | None = None
     due_confidence: str = "unknown"
 

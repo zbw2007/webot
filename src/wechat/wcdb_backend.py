@@ -320,33 +320,38 @@ class WcdbBackend(AbstractWeChatBackend):
             self._groups = list(self._talker_ids.keys())
 
         else:
-            # Manual mode: match configured names against resolved display names
+            # Manual mode: stable chat IDs are preferred.  Display-name
+            # matching is retained for legacy configuration, but ambiguous
+            # names are rejected instead of selecting an arbitrary chat.
             for group_name in self._groups:
-                found = None
-                for username, info in all_chatrooms.items():
-                    display = info["name"]
-                    if group_name.lower() in display.lower() or display.lower() in group_name.lower():
-                        found = username
-                        break
-                if found:
+                # Direct lookup: maybe group_name IS a stable username such
+                # as 20968749111@chatroom.
+                if group_name in all_chatrooms:
+                    self._talker_ids[group_name] = group_name
+                    display = all_chatrooms[group_name]["name"]
+                    if display and display != group_name:
+                        self._talker_ids[display] = group_name
+                    logger.info("Resolved '%s' as direct username", group_name)
+                    continue
+
+                exact = [username for username, info in all_chatrooms.items()
+                         if group_name.casefold() == info["name"].casefold()]
+                candidates = exact or [
+                    username for username, info in all_chatrooms.items()
+                    if group_name.casefold() in info["name"].casefold()
+                    or info["name"].casefold() in group_name.casefold()
+                ]
+                if len(candidates) == 1:
+                    found = candidates[0]
                     self._talker_ids[group_name] = found
                     logger.info("Resolved '%s' -> %s (display='%s')", group_name, found, all_chatrooms[found]["name"])
+                elif len(candidates) > 1:
+                    logger.error("Refusing ambiguous group '%s'; matches=%s", group_name, candidates)
                 else:
-                    # Direct lookup: maybe group_name IS a username like 20968749111@chatroom
-                    if group_name in all_chatrooms:
-                        self._talker_ids[group_name] = group_name
-                        # Keep the stable chat_id as the polling key while
-                        # also retaining the human-readable title for window
-                        # validation and keyboard navigation.
-                        display = all_chatrooms[group_name]["name"]
-                        if display and display != group_name:
-                            self._talker_ids[display] = group_name
-                        logger.info("Resolved '%s' as direct username", group_name)
-                    else:
-                        logger.warning(
-                            "Could not resolve group '%s'. Available: %s",
-                            group_name, list(all_chatrooms.keys()),
-                        )
+                    logger.warning(
+                        "Could not resolve group '%s'. Available: %s",
+                        group_name, list(all_chatrooms.keys()),
+                    )
 
         # Persist chat_id -> display_name so the web UI can show
         # human-readable group names in the nickname dropdown.

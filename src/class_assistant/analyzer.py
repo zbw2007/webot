@@ -11,6 +11,9 @@ if BaseModel is not None:
     class _TodoPayload(BaseModel):
         model_config = ConfigDict(extra="forbid")
         title: str
+        description: str = ""
+        location: str = ""
+        assignee: str = ""
         due_at: str | None = None
         due_confidence: Literal["high", "medium", "low", "unknown", "needs_confirmation"] = "unknown"
         group_id: str | None = None
@@ -51,6 +54,9 @@ def analyze(messages, call_model):
     for todo in result["todos"]:
         if not isinstance(todo, dict) or not isinstance(todo.get("title"), str) or not todo["title"].strip():
             raise AnalysisError("todo schema invalid")
+        for field in ("description", "location", "assignee"):
+            if field in todo and not isinstance(todo[field], str):
+                raise AnalysisError("todo schema invalid")
         if todo.get("due_confidence", "unknown") not in {"high", "medium", "low", "unknown", "needs_confirmation"}:
             raise AnalysisError("todo due confidence invalid")
     for candidate in result["reply_candidates"]:

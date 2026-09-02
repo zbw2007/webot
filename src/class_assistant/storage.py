@@ -31,7 +31,7 @@ class Storage:
         );
         CREATE INDEX IF NOT EXISTS idx_captured_chat_time ON captured_messages(chat_id, timestamp);
         CREATE TABLE IF NOT EXISTS digest_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, scheduled_slot TEXT UNIQUE NOT NULL, status TEXT NOT NULL, is_catch_up INTEGER NOT NULL DEFAULT 0, window_start TEXT, window_end TEXT, started_at INTEGER, completed_at INTEGER, error TEXT);
-        CREATE TABLE IF NOT EXISTS todo_items (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, due_at TEXT, due_confidence TEXT NOT NULL DEFAULT 'unknown', status TEXT NOT NULL DEFAULT 'open', source_message_id TEXT, created_at INTEGER NOT NULL DEFAULT 0, completed_at INTEGER);
+        CREATE TABLE IF NOT EXISTS todo_items (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', location TEXT NOT NULL DEFAULT '', assignee TEXT NOT NULL DEFAULT '', due_at TEXT, due_confidence TEXT NOT NULL DEFAULT 'unknown', status TEXT NOT NULL DEFAULT 'open', source_message_id TEXT, created_at INTEGER NOT NULL DEFAULT 0, completed_at INTEGER);
         CREATE TABLE IF NOT EXISTS reply_drafts (id TEXT NOT NULL, version INTEGER NOT NULL, chat_id TEXT NOT NULL, group_name TEXT NOT NULL DEFAULT '', text TEXT NOT NULL, status TEXT NOT NULL, risk_level TEXT NOT NULL DEFAULT 'low', approved_version INTEGER, send_fingerprint TEXT, source_message_id TEXT, created_at INTEGER NOT NULL DEFAULT 0, expires_at INTEGER, UNIQUE(id, version));
         CREATE TABLE IF NOT EXISTS audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, draft_id TEXT, action TEXT NOT NULL, actor TEXT NOT NULL DEFAULT '', details TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS group_whitelist (chat_id TEXT PRIMARY KEY, display_name TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1);
@@ -40,7 +40,7 @@ class Storage:
         # Add fields when opening databases created by the initial safety-core release.
         for table, columns in {
             "digest_runs": {"run_id": "TEXT", "window_start": "TEXT", "window_end": "TEXT", "started_at": "INTEGER", "completed_at": "INTEGER", "error": "TEXT"},
-            "todo_items": {"group_id": "TEXT NOT NULL DEFAULT ''", "due_confidence": "TEXT NOT NULL DEFAULT 'unknown'", "created_at": "INTEGER NOT NULL DEFAULT 0", "completed_at": "INTEGER"},
+            "todo_items": {"group_id": "TEXT NOT NULL DEFAULT ''", "description": "TEXT NOT NULL DEFAULT ''", "location": "TEXT NOT NULL DEFAULT ''", "assignee": "TEXT NOT NULL DEFAULT ''", "due_confidence": "TEXT NOT NULL DEFAULT 'unknown'", "created_at": "INTEGER NOT NULL DEFAULT 0", "completed_at": "INTEGER"},
             "reply_drafts": {"group_name": "TEXT NOT NULL DEFAULT ''", "approved_version": "INTEGER", "send_fingerprint": "TEXT", "source_message_id": "TEXT", "created_at": "INTEGER NOT NULL DEFAULT 0", "expires_at": "INTEGER"},
             "audit_events": {"actor": "TEXT NOT NULL DEFAULT ''", "details": "TEXT NOT NULL DEFAULT ''"},
         }.items():
@@ -146,7 +146,7 @@ class Storage:
         ).fetchone()
         if existing is not None:
             return existing
-        cur = self.conn.execute("INSERT INTO todo_items(group_id,title,due_at,due_confidence,status,source_message_id,created_at) VALUES(?,?,?,?,?,?,?)", (todo.get("group_id", ""), todo["title"], todo.get("due_at"), todo.get("due_confidence", "unknown"), todo.get("status", "open"), todo.get("source_message_id"), todo.get("created_at", int(time.time()))))
+        cur = self.conn.execute("INSERT INTO todo_items(group_id,title,description,location,assignee,due_at,due_confidence,status,source_message_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (todo.get("group_id", ""), todo["title"], todo.get("description", ""), todo.get("location", ""), todo.get("assignee", ""), todo.get("due_at"), todo.get("due_confidence", "unknown"), todo.get("status", "open"), todo.get("source_message_id"), todo.get("created_at", int(time.time()))))
         if commit:
             self.conn.commit()
         return self.conn.execute("SELECT * FROM todo_items WHERE id=?", (cur.lastrowid,)).fetchone()

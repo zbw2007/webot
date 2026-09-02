@@ -277,6 +277,9 @@ class ClassAssistantService:
                     todo_rows.append({
                         "group_id": todo.get("group_id") or chat_id,
                         "title": todo["title"].strip(),
+                        "description": todo.get("description", "").strip(),
+                        "location": todo.get("location", "").strip(),
+                        "assignee": todo.get("assignee", "").strip(),
                         "due_at": todo.get("due_at"),
                         "due_confidence": todo.get("due_confidence", "unknown"),
                         "status": "open",

@@ -1042,8 +1042,17 @@ class _UIHandler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
 
     def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        if self.path.startswith("/api/class-assistant"):
+            origin = str(self.headers.get("Origin", ""))
+            if origin and origin not in {"http://127.0.0.1:7327", "http://localhost:7327"}:
+                self.send_response(403)
+                self.end_headers()
+                return
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", origin or "http://127.0.0.1:7327")
+        else:
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Max-Age", "86400")
@@ -1088,11 +1097,11 @@ class _UIHandler(SimpleHTTPRequestHandler):
         headers = getattr(self, "headers", None)
         if headers is not None:
             host = str(headers.get("Host", ""))
-            if host and host.split(":", 1)[0] not in {"127.0.0.1", "localhost"}:
+            if host and host not in {"127.0.0.1:7327", "localhost:7327", "127.0.0.1", "localhost"}:
                 self.send_json({"ok": False, "error": "class assistant API is local-only"})
                 return
             origin = str(headers.get("Origin", ""))
-            if origin and not (origin.startswith("http://127.0.0.1:") or origin.startswith("http://localhost:")):
+            if origin and origin not in {"http://127.0.0.1:7327", "http://localhost:7327"}:
                 self.send_json({"ok": False, "error": "class assistant API origin is not allowed"})
                 return
         service = _get_class_assistant_service()
@@ -2466,7 +2475,11 @@ class _UIHandler(SimpleHTTPRequestHandler):
     def send_json(self, data):
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        if self.path.startswith("/api/class-assistant"):
+            origin = str(getattr(self, "headers", {}).get("Origin", ""))
+            self.send_header("Access-Control-Allow-Origin", origin or "http://127.0.0.1:7327")
+        else:
+            self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
