@@ -29,7 +29,7 @@ DIGEST_SCHEDULE=08:00,20:00
 
 ## 审核和发送
 
-审核状态为 `pending_review → edited → approved → sending → sent`。编辑会创建新版本并撤销旧批准；高风险内容（请假、成绩、费用、承诺、投诉、隐私）必须先编辑。发送接口需要最新版本和一次性确认令牌。发送前还会验证白名单、群名和重复指纹。
+审核状态为 `pending_review → edited → approved → sending → sent`。编辑会创建新版本并撤销旧批准；高风险内容（请假、成绩、费用、承诺、投诉、隐私）必须先编辑。发送接口需要最新版本和一次性确认令牌。发送前还会验证白名单、群名和重复指纹。真实发送前由 WeChat 后端自行解析 `chat_id`、检查当前可见窗口标题和登录状态；浏览器提交的窗口名不被当作安全依据。
 
 在 `DRY_RUN=true` 时会完整执行校验，但不会调用 WeChat 发送器。发送器崩溃会留下 `sending` 状态，需人工核对，不会自动重发。
 
@@ -44,6 +44,7 @@ DIGEST_SCHEDULE=08:00,20:00
 * `GET /api/class-assistant/groups`
 * `GET /api/class-assistant/audit`
 * `POST /api/class-assistant/drafts/{id}/approve|reject|edit|send`
+* `POST /api/class-assistant/drafts/{id}/mark-sent|mark-failed`（发送崩溃后的人工对账）
 * `POST /api/class-assistant/token`
 * `POST /api/class-assistant/stop`
 
