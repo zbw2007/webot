@@ -169,6 +169,14 @@ class ClassAssistantService:
             return self._model_call(messages)
         return self._default_model_call(messages)
 
+    def _analyze_group(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        """Validate model JSON and retry a schema/JSON failure once."""
+        try:
+            return analyze(messages, self._call_model)
+        except AnalysisError:
+            logger.warning("Class-assistant model returned invalid JSON; retrying once")
+            return analyze(messages, self._call_model)
+
     def _ensure_summarizer(self) -> None:
         if self._summarizer is not None:
             return
@@ -269,7 +277,7 @@ class ClassAssistantService:
             for chat_id, group_messages in by_group.items():
                 # Analyze each whitelisted group independently so a teacher's
                 # notice never gets mixed with another class's context.
-                result = analyze(group_messages, self._call_model)
+                result = self._analyze_group(group_messages)
                 if result.get("summary"):
                     summaries.append(str(result["summary"]))
                 analyzed_groups.append((chat_id, group_messages, result))

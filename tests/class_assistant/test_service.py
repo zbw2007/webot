@@ -155,6 +155,26 @@ def test_failed_analysis_does_not_advance_analysis_cursor(tmp_path):
     assert len(calls) == 1
 
 
+def test_invalid_json_is_retried_once(tmp_path):
+    storage = Storage(str(tmp_path / "assistant.db"))
+    config = Config()
+    responses = iter([
+        "not-json",
+        {"summary": "重试成功", "todos": [], "reply_candidates": []},
+    ])
+    calls = []
+
+    def model(messages):
+        calls.append(messages)
+        return next(responses)
+
+    service = ClassAssistantService(config, storage=storage, model_call=model)
+    service.handle(message("retry", timestamp=100))
+    result = service.run_digest(now=datetime.fromisoformat("2026-09-02T20:01:00+08:00"), force=True)
+    assert result["status"] == "succeeded"
+    assert len(calls) == 2
+
+
 def test_storage_persistent_fingerprint_deduplicates_restart(tmp_path):
     path = str(tmp_path / "assistant.db")
     first = Storage(path)
