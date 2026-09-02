@@ -19,7 +19,7 @@
 - 微信：未登录、未读取消息，尚未确认版本兼容性
 - `native/windows/wcdb_api.dll`：当前浅克隆中不存在，因此没有可记录的 DLL SHA-256；在 DLL 来源、版本和哈希确认前禁止接入主账号。
 
-已通过可信镜像安装的运行依赖包括 Pillow、psutil、pyperclip、uiautomation、comtypes、pywebview、pywin32、Pydantic、OpenAI/Anthropic 客户端等；`pip check` 无破损依赖。
+已通过可信镜像安装的运行依赖包括 Pillow、psutil、pyperclip、uiautomation、comtypes、pywebview、pywin32、Pydantic、OpenAI/Anthropic 客户端，以及 `silk-python`、`opencc-python-reimplemented`、`faster-whisper`；核心和可选语音模块均可导入，`pip check` 无破损依赖。
 
 ## 验证记录
 
