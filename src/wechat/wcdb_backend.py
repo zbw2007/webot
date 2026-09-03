@@ -101,6 +101,10 @@ class WcdbBackend(AbstractWeChatBackend):
                 self._client.init()
                 self._client.open()
                 self._resolve_groups()
+                if not self._talker_ids:
+                    logger.error("No groups resolved. Check WECHAT_GROUPS.")
+                    self._close_client_locked()
+                    return
             logger.info("WCDB database opened successfully")
         except Exception as e:
             if isinstance(e, (KeyboardInterrupt, SystemExit)):
@@ -108,22 +112,13 @@ class WcdbBackend(AbstractWeChatBackend):
             logger.error("Failed to initialize WCDB: %s", e)
             # If init() allocated DLL/WCDB engine but open() failed,
             # clean up native resources so repeated retries don't leak.
-            if self._client is not None:
-                try:
-                    with self._client_lock:
-                        self._client.close()
-                    self._client = None
-                except Exception:
-                    pass
+            with self._client_lock:
+                self._close_client_locked()
             try:
                 from src.web.server import update_status
                 update_status(running=False, error=str(e))
             except Exception:
                 pass
-            return
-
-        if not self._talker_ids:
-            logger.error("No groups resolved. Check WECHAT_GROUPS.")
             return
 
         # Pre-find WeChat window
@@ -186,9 +181,18 @@ class WcdbBackend(AbstractWeChatBackend):
             self._pool.shutdown(wait=True, cancel_futures=True)
             self._pool = None
             with self._client_lock:
-                if self._client:
-                    self._client.close()
+                self._close_client_locked()
         logger.info("WcdbBackend stopped.")
+
+    def _close_client_locked(self) -> None:
+        """Close the WCDB client; caller must hold ``_client_lock``."""
+        client = self._client
+        self._client = None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
     def send_text(self, chat_id: str, content: str) -> bool:
         if not content:
@@ -240,11 +244,7 @@ class WcdbBackend(AbstractWeChatBackend):
         """
         logger.warning("Reinitializing WCDB backend after consecutive errors...")
         with self._client_lock:
-            if self._client:
-                try:
-                    self._client.close()
-                except Exception:
-                    pass
+            self._close_client_locked()
             try:
                 self._client = WcdbNativeClient()
                 self._client.init()

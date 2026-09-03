@@ -42,6 +42,23 @@ class LifecycleClient:
         return "resolved"
 
 
+class CleanupClient:
+    def __init__(self):
+        self.close_calls = 0
+
+    def init(self):
+        pass
+
+    def open(self):
+        pass
+
+    def close(self):
+        self.close_calls += 1
+
+    def get_sessions(self):
+        return []
+
+
 def test_reinitialize_serializes_close_and_discovery_client_calls(monkeypatch):
     closed = threading.Event()
     old_client = LifecycleClient(closed)
@@ -64,6 +81,17 @@ def test_reinitialize_serializes_close_and_discovery_client_calls(monkeypatch):
     assert not reinit.is_alive()
     assert not discovery.is_alive()
     assert old_client.invalid_calls_during_close == []
+
+
+def test_start_closes_client_when_no_configured_groups_resolve(monkeypatch):
+    client = CleanupClient()
+    backend = WcdbBackend(groups=["missing@chatroom"])
+    monkeypatch.setattr(wcdb_backend, "WcdbNativeClient", lambda: client)
+
+    backend.start(lambda _message: None)
+
+    assert client.close_calls == 1
+    assert backend._client is None
 
 
 def test_standardize_serializes_nickname_resolution_with_reinitialize(monkeypatch):
