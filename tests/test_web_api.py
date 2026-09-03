@@ -1057,6 +1057,19 @@ class ApiStartStopEndpointTests(unittest.TestCase):
 class ApiConfigEndpointTests(unittest.TestCase):
     """Tests for /api/config and /api/load-config."""
 
+    def test_save_config_rejects_class_assistant_wildcards_without_writing_env(self):
+        for groups in (None, 123, [None], [123], [], [""], [" * "], ["all"], [" ALL "]):
+            with self.subTest(groups=groups):
+                with patch("src.web.server._find_or_create_env") as mock_find:
+                    body = json.dumps({"class_assistant_groups": groups})
+                    _handler, sock = _build_handler(
+                        "/api/config", method="POST", body=body.encode(),
+                        headers={"Content-Type": "application/json"},
+                    )
+                    result = json.loads(sock.get_response_text().split("\r\n\r\n", 1)[1])
+                    self.assertFalse(result["ok"])
+                    mock_find.assert_not_called()
+
     def test_load_config_returns_defaults_when_no_env(self):
         """GET /api/load-config returns defaults when no .env exists."""
         with patch("src.web.server._find_or_create_env") as mock_find:

@@ -319,11 +319,23 @@ def _validate_config(kwargs: dict) -> None:
     """Validate numeric config values.  Prints clear errors and exits on bad values."""
     errors: list[str] = []
 
-    assistant_groups = kwargs.get("class_assistant_groups", [])
-    if any(not str(group).strip() for group in assistant_groups):
-        errors.append("CLASS_ASSISTANT_GROUPS values must be non-empty")
-    if "*" in {str(group).strip() for group in assistant_groups}:
-        errors.append("CLASS_ASSISTANT_GROUPS must not contain '*'")
+    if "class_assistant_groups" in kwargs:
+        assistant_groups = kwargs["class_assistant_groups"]
+        if isinstance(assistant_groups, str) or assistant_groups is None:
+            errors.append("CLASS_ASSISTANT_GROUPS must be a non-empty iterable of strings")
+            assistant_groups = []
+        else:
+            try:
+                assistant_groups = list(assistant_groups)
+            except TypeError:
+                errors.append("CLASS_ASSISTANT_GROUPS must be a non-empty iterable of strings")
+                assistant_groups = []
+        if not assistant_groups:
+            errors.append("CLASS_ASSISTANT_GROUPS must be non-empty")
+        if any(not isinstance(group, str) or not group.strip() for group in assistant_groups):
+            errors.append("CLASS_ASSISTANT_GROUPS values must be non-empty strings")
+        if any(group.strip().casefold() in {"*", "all"} for group in assistant_groups if isinstance(group, str)):
+            errors.append("CLASS_ASSISTANT_GROUPS must not contain '*' or 'all'")
 
     schedule = str(kwargs.get("class_assistant_digest_schedule", "08:00,20:00"))
     slots = [part.strip() for part in schedule.split(",") if part.strip()]
@@ -597,6 +609,11 @@ def load_config() -> BotConfig:
     if todo_delete_keywords is not None:
         kwargs["todo_delete_keywords"] = todo_delete_keywords
 
+    # An omitted class-assistant groups setting retains the dataclass default;
+    # an explicitly supplied empty value is invalid and is checked above.
+    if (not os.getenv("CLASS_ASSISTANT_GROUPS", "").strip()
+            and not kwargs.get("class_assistant_enabled", False)):
+        kwargs.pop("class_assistant_groups", None)
     _validate_config(kwargs)
 
     return BotConfig(**kwargs)

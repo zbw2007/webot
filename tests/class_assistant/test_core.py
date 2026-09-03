@@ -22,6 +22,25 @@ def test_whitelist_requires_explicit_group_and_rejects_private():
         GroupWhitelist([""])
 
 
+@pytest.mark.parametrize("raw", ["*", " * ", "all", " ALL ", "All", None, 123, [None], [123]])
+def test_whitelist_rejects_non_string_and_wildcard_inputs(raw):
+    with pytest.raises(ValueError):
+        GroupWhitelist(raw)
+
+
+def test_whitelist_materializes_generator_once():
+    calls = 0
+
+    def groups():
+        nonlocal calls
+        calls += 1
+        yield " class@chatroom "
+
+    whitelist = GroupWhitelist(groups())
+    assert calls == 1
+    assert whitelist.chat_ids == frozenset({"class@chatroom"})
+
+
 def test_dedup_uses_id_and_content_fingerprint():
     d = Deduplicator()
     m = {"chat_id": "g", "message_id": "1", "content": "通知", "timestamp": 10}

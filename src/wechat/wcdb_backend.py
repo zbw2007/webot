@@ -21,6 +21,7 @@ from .base import AbstractWeChatBackend, MessageCallback
 from .wcdb_client import WcdbNativeClient
 from .window_controller import WeChatWindowController
 from .helpers import DedupSet
+from src.class_assistant.whitelist import is_auto_discovery_token
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,17 @@ class WcdbBackend(AbstractWeChatBackend):
                  config=None):
         self._bot_name = bot_display_name
         self._groups = groups or []
+        if config is not None and getattr(config, "class_assistant_enabled", False):
+            try:
+                configured_groups = list(self._groups)
+            except TypeError:
+                configured_groups = []
+            if not configured_groups or any(
+                not isinstance(group, str) or not group.strip()
+                or is_auto_discovery_token(group) for group in configured_groups
+            ):
+                raise ValueError("class assistant groups must be explicit non-wildcard strings")
+            self._groups = configured_groups
         self._poll_sec = poll_sec
         self._store = store  # MessageStore fallback for name resolution
         self._running = False
@@ -307,8 +319,13 @@ class WcdbBackend(AbstractWeChatBackend):
 
         auto_discover = (
             not self._groups
-            or (len(self._groups) == 1 and self._groups[0].strip() in ("*", "all", ""))
+            or (len(self._groups) == 1 and isinstance(self._groups[0], str)
+                and (not self._groups[0].strip() or is_auto_discovery_token(self._groups[0])))
         )
+
+        if getattr(self._voice_config, "class_assistant_enabled", False) and auto_discover:
+            logger.error("Class assistant groups must be explicit; refusing auto-discovery")
+            return
 
         if auto_discover:
             for username, info in all_chatrooms.items():

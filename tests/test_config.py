@@ -520,6 +520,14 @@ class LoadConfigTests(unittest.TestCase):
 class ValidateConfigTests(unittest.TestCase):
     """Tests for _validate_config() numeric range validation."""
 
+    def test_validate_config_rejects_invalid_class_assistant_groups(self):
+        from src.config import _validate_config
+
+        for raw in (None, 123, [None], [123], [], [""], [" * "], ["all"], [" ALL "]):
+            with self.subTest(raw=raw):
+                with self.assertRaises(RuntimeError):
+                    _validate_config({"class_assistant_groups": raw})
+
     def test_poll_interval_sec_below_minimum_raises(self):
         """poll_interval_sec < 0.1 → RuntimeError."""
         from src.config import _validate_config

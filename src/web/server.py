@@ -24,6 +24,7 @@ from urllib.parse import unquote, urlsplit, parse_qs
 # make the name a local — so it must be imported at module level too,
 # otherwise the first branch that references it raises UnboundLocalError.
 from src.config import _decode_wechat_groups
+from src.class_assistant.whitelist import is_auto_discovery_token
 
 logger = logging.getLogger(__name__)
 
@@ -1381,11 +1382,16 @@ class _UIHandler(SimpleHTTPRequestHandler):
             body = self.rfile.read(content_len) if content_len else b"{}"
             try:
                 config = json.loads(body)
-                assistant_groups = config.get("class_assistant_groups", []) or []
-                if isinstance(assistant_groups, str):
-                    assistant_groups = [part.strip() for part in assistant_groups.split(",") if part.strip()]
-                if "*" in assistant_groups:
-                    raise ValueError("CLASS_ASSISTANT_GROUPS must not contain '*'")
+                if "class_assistant_groups" in config:
+                    assistant_groups = config["class_assistant_groups"]
+                    if isinstance(assistant_groups, str):
+                        assistant_groups = [part.strip() for part in assistant_groups.split(",") if part.strip()]
+                    if not isinstance(assistant_groups, list) or not assistant_groups:
+                        raise ValueError("CLASS_ASSISTANT_GROUPS must be a non-empty list of strings")
+                    if any(not isinstance(group, str) or not group.strip() for group in assistant_groups):
+                        raise ValueError("CLASS_ASSISTANT_GROUPS values must be non-empty strings")
+                    if any(is_auto_discovery_token(group) for group in assistant_groups):
+                        raise ValueError("CLASS_ASSISTANT_GROUPS must not contain '*' or 'all'")
                 if str(config.get("digest_schedule", "08:00,20:00")).replace(" ", "") != "08:00,20:00":
                     raise ValueError("DIGEST_SCHEDULE must be exactly '08:00,20:00'")
                 env_path = _find_or_create_env()
