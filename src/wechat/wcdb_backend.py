@@ -86,6 +86,9 @@ class WcdbBackend(AbstractWeChatBackend):
         # Thread safety: WCDB DLL (ctypes) may not be thread-safe internally.
         # All _client calls are serialized through this lock.
         self._client_lock = threading.Lock()
+        # Sending is independently gated from native-client access.  Lifecycle
+        # shutdown closes this gate before cancelling queued workers.
+        self._send_lock = threading.Lock()
         # Callback thread pool — fire-and-forget AI calls so the poll loop
         # never blocks on a slow summarization.
         self._pool: concurrent.futures.ThreadPoolExecutor | None = None
@@ -275,15 +278,18 @@ class WcdbBackend(AbstractWeChatBackend):
 
         # Init and open database
         try:
-            with self._client_lock:
-                self._client = WcdbNativeClient()
-                self._client.init()
-                self._client.open()
-                self._resolve_groups()
-                if not self._talker_ids:
-                    logger.error("No groups resolved. Check WECHAT_GROUPS.")
-                    self._close_client_locked()
-                    return
+            # Lifecycle lock order is always lease -> client.  This keeps
+            # startup consistent with polling, reinitialization, and stop.
+            with self._lease_lock:
+                with self._client_lock:
+                    self._client = WcdbNativeClient()
+                    self._client.init()
+                    self._client.open()
+                    self._resolve_groups()
+                    if not self._talker_ids:
+                        logger.error("No groups resolved. Check WECHAT_GROUPS.")
+                        self._close_client_locked()
+                        return
                 for talker in set(self._talker_ids.values()):
                     self._acquire_poll_lease(talker)
             logger.info("WCDB database opened successfully")
@@ -291,9 +297,10 @@ class WcdbBackend(AbstractWeChatBackend):
             # Initialization may have acquired some leases before a later
             # group fails.  Always release those leases, including when the
             # caller interrupts startup, before propagating fatal signals.
-            with self._client_lock:
-                self._close_client_locked()
-            self._release_poll_leases()
+            with self._lease_lock:
+                self._release_poll_leases()
+                with self._client_lock:
+                    self._close_client_locked()
             if isinstance(e, (KeyboardInterrupt, SystemExit)):
                 raise
             logger.error("WCDB initialization failed")
@@ -315,7 +322,8 @@ class WcdbBackend(AbstractWeChatBackend):
             self._pool = concurrent.futures.ThreadPoolExecutor(
                 max_workers=4, thread_name_prefix="bot-cb-",
             )
-            self._running = True
+            with self._send_lock:
+                self._running = True
             consecutive_errors = 0
 
             # Import once to avoid per-iteration overhead
@@ -368,20 +376,24 @@ class WcdbBackend(AbstractWeChatBackend):
             except Exception:
                 pass
         finally:
-            pool = self._pool
-            self._pool = None
-            if pool is not None:
-                # Drain in-flight callbacks gracefully.  Cleanup continues if
-                # an executor implementation itself raises during shutdown.
-                try:
-                    pool.shutdown(wait=True, cancel_futures=True)
-                except Exception:
-                    logger.warning("Failed to shut down callback pool")
-            with self._client_lock:
-                self._close_client_locked()
-            # Release leases even if shutdown, client close, or the poll loop
-            # exited through an exception or KeyboardInterrupt.
-            self._release_poll_leases()
+            with self._lease_lock:
+                # Close the send gate before draining/cancelling workers.
+                with self._send_lock:
+                    self._running = False
+                    pool = self._pool
+                    self._pool = None
+                if pool is not None:
+                    # Drain in-flight callbacks gracefully.  Cleanup continues
+                    # if an executor implementation itself raises during shutdown.
+                    try:
+                        pool.shutdown(wait=True, cancel_futures=True)
+                    except Exception:
+                        logger.warning("Failed to shut down callback pool")
+                with self._client_lock:
+                    self._close_client_locked()
+                # Release leases even if shutdown, client close, or the poll
+                # loop exited through an exception or KeyboardInterrupt.
+                self._release_poll_leases()
         logger.info("WcdbBackend stopped.")
 
     def _close_client_locked(self) -> None:
@@ -433,11 +445,14 @@ class WcdbBackend(AbstractWeChatBackend):
 
     def stop(self) -> None:
         with self._lease_lock:
-            self._running = False
-            pool = self._pool
-            self._pool = None
+            # Acquire the same gate used by reply workers.  A worker that has
+            # not entered the sender yet will observe stopped state and skip.
+            with self._send_lock:
+                self._running = False
+                pool = self._pool
+                self._pool = None
             if pool:
-                pool.shutdown(wait=False)
+                pool.shutdown(wait=False, cancel_futures=True)
             with self._client_lock:
                 self._close_client_locked()
             self._release_poll_leases()
@@ -842,7 +857,11 @@ class WcdbBackend(AbstractWeChatBackend):
                 # _send_and_confirm uses window_controller (keyboard), not
                 # _client (WCDB).  Don't hold _client_lock during send —
                 # it blocks the poll loop from reading new messages.
-                sent = self._send_and_confirm(group_name, talker, reply)
+                with self._send_lock:
+                    if not self._running:
+                        sent = False
+                    else:
+                        sent = self._send_and_confirm(group_name, talker, reply)
                 if sent:
                     success = True
                     logger.info("Reply sent; chars=%d", len(reply))

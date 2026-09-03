@@ -853,3 +853,77 @@ def test_commit_contiguous_cleans_ledger_at_durable_cursor():
     assert backend._discovered_positions["g"] == {}
     assert backend._completed_positions["g"] == set()
     assert backend._pending_success["g"] == {}
+
+
+def test_stop_closes_send_gate_before_reply_worker_can_send():
+    backend = WcdbBackend(groups=["class@chatroom"])
+    backend._running = True
+    callback_ready = threading.Event()
+    callback_release = threading.Event()
+    sent = []
+    standardized = {"timestamp": 1, "message_id": "m1", "content": "hello"}
+
+    def callback(_message):
+        callback_ready.set()
+        callback_release.wait(timeout=2)
+        return "reply"
+
+    backend._send_and_confirm = lambda *_args: sent.append(True) or True
+    worker = threading.Thread(target=backend._handle_message, args=(
+        "class@chatroom", "class@chatroom", standardized, callback,
+    ))
+    worker.start()
+    assert callback_ready.wait(timeout=1)
+    backend.stop()
+    callback_release.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert sent == []
+
+
+def test_stop_cancels_queued_callback_futures():
+    backend = WcdbBackend(groups=["class@chatroom"])
+    backend._running = True
+    backend._pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    started = threading.Event()
+    release = threading.Event()
+
+    running = backend._pool.submit(lambda: (started.set(), release.wait(timeout=2)))
+    queued = backend._pool.submit(lambda: "must not run")
+    assert started.wait(timeout=1)
+    backend.stop()
+    release.set()
+    running.result(timeout=2)
+    assert queued.cancelled()
+
+
+def test_lifecycle_lock_order_does_not_deadlock(monkeypatch):
+    backend = WcdbBackend(groups=["class@chatroom"])
+    backend._running = True
+    backend._pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+    class FakeClient:
+        def init(self):
+            pass
+
+        def open(self):
+            pass
+
+        def close(self):
+            pass
+
+    backend._client = FakeClient()
+    backend._talker_ids = {"class@chatroom": "class@chatroom"}
+    backend._resolve_groups = lambda: None
+    backend._acquire_poll_lease = lambda _talker: True
+    backend._release_poll_leases = lambda: None
+    backend._window.find_hwnd = lambda: None
+    monkeypatch.setattr(wcdb_backend, "WcdbNativeClient", FakeClient)
+
+    threads = [threading.Thread(target=backend.stop),
+               threading.Thread(target=backend._reinitialize)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+    assert all(not thread.is_alive() for thread in threads)
