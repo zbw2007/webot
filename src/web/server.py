@@ -1099,17 +1099,17 @@ class _UIHandler(SimpleHTTPRequestHandler):
         if headers is not None:
             host = str(headers.get("Host", ""))
             if host and host not in {"127.0.0.1:7327", "localhost:7327", "127.0.0.1", "localhost"}:
-                self.send_json({"ok": False, "error": "class assistant API is local-only"})
+                self._send_json_status({"ok": False, "error": "class assistant API is local-only"}, 403)
                 return
             origin = str(headers.get("Origin", ""))
             if origin and origin not in {"http://127.0.0.1:7327", "http://localhost:7327"}:
-                self.send_json({"ok": False, "error": "class assistant API origin is not allowed"})
+                self._send_json_status({"ok": False, "error": "class assistant API origin is not allowed"}, 403)
                 return
         service = _get_class_assistant_service()
         parsed = urlsplit(self.path)
         path = parsed.path.rstrip("/")
         if service is None:
-            self.send_json({"ok": False, "error": "class assistant is not running"})
+            self._send_json_status({"ok": False, "error": "class assistant is not running"}, 503)
             return
         try:
             if path == "/api/class-assistant/status" and self.command == "GET":
@@ -1146,6 +1146,13 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 if not groups:
                     groups = [{"chat_id": chat_id, "display_name": "", "enabled": 1} for chat_id in service.whitelist.chat_ids]
                 self.send_json({"ok": True, "items": groups})
+                return
+            if path == "/api/class-assistant/groups/discover" and self.command == "POST":
+                items = service.discover_groups()
+                self.send_json({"ok": True, "items": [
+                    {key: item[key] for key in ("chat_id", "display_name", "member_count")}
+                    for item in items
+                ]})
                 return
             if path == "/api/class-assistant/audit" and self.command == "GET":
                 self.send_json({"ok": True, "items": service.list_records("audit_events")})
@@ -1188,10 +1195,10 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 return
             raise ValueError("unknown class-assistant endpoint")
         except (KeyError, TypeError, ValueError) as exc:
-            self.send_json({"ok": False, "error": str(exc)})
+            self._send_json_status({"ok": False, "error": str(exc)}, 400)
         except Exception as exc:
             logger.exception("Class-assistant API request failed")
-            self.send_json({"ok": False, "error": str(exc)})
+            self._send_json_status({"ok": False, "error": str(exc)}, 503)
 
     def _handle_request(self):
         # ── WebSocket upgrade ─────────────────────────────────────────
@@ -2478,8 +2485,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
         ):
             logger.warning("HTTP %s", format % args)
 
-    def send_json(self, data):
-        self.send_response(200)
+    def send_json(self, data, status=200):
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         if self.path.startswith("/api/class-assistant"):
             origin = str(getattr(self, "headers", {}).get("Origin", ""))
@@ -2490,6 +2497,13 @@ class _UIHandler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
+
+    def _send_json_status(self, data, status):
+        """Send an HTTP status while remaining compatible with unit fakes."""
+        try:
+            self.send_json(data, status=status)
+        except TypeError:
+            self.send_json(data)
 
 
 def _run_server(host, port):

@@ -22,6 +22,7 @@ from .wcdb_client import WcdbNativeClient
 from .window_controller import WeChatWindowController
 from .helpers import DedupSet
 from src.class_assistant.whitelist import is_auto_discovery_token
+from src.class_assistant.group_discovery import discover_groups
 
 logger = logging.getLogger(__name__)
 
@@ -403,6 +404,13 @@ class WcdbBackend(AbstractWeChatBackend):
                 logger.warning("Failed to resolve members for %s: %s", username, e)
         if group_members:
             self._save_group_members(group_members)
+
+    def discover_group_metadata(self) -> list[dict]:
+        """Discover group metadata under the native client lock."""
+        with self._client_lock:
+            if self._client is None:
+                raise RuntimeError("WCDB backend is not ready")
+            return discover_groups(self._client)
 
     @staticmethod
     def _save_group_members(chat_members: dict[str, dict[str, str]]) -> None:

@@ -20,6 +20,7 @@ export default function ClassAssistantPanel() {
   const [todos, setTodos] = useState([])
   const [drafts, setDrafts] = useState([])
   const [groups, setGroups] = useState([])
+  const [discoveredGroups, setDiscoveredGroups] = useState([])
   const [settings, setSettings] = useState(null)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
@@ -52,7 +53,7 @@ export default function ClassAssistantPanel() {
     const groups = Array.isArray(settings.class_assistant_groups)
       ? settings.class_assistant_groups
       : String(settings.class_assistant_groups || '').split(',').map(v => v.trim()).filter(Boolean)
-    if (groups.includes('*')) { setError('班级助手白名单不能使用 *'); return }
+    if (groups.some(group => ['*', 'all'].includes(String(group).toLowerCase()))) { setError('班级助手白名单不能使用 * 或 all'); return }
     setBusy(true)
     try {
       await request('/api/config', { method: 'POST', body: JSON.stringify({ ...settings, class_assistant_groups: groups }) })
@@ -60,6 +61,18 @@ export default function ClassAssistantPanel() {
       setSaved(true)
       setTimeout(() => setSaved(false), 2500)
     } catch (e) { setError(e.message) } finally { setBusy(false) }
+  }
+
+  async function discoverGroups() {
+    setBusy(true)
+    try { const result = await request('/api/class-assistant/groups/discover', { method: 'POST', body: '{}' }); setDiscoveredGroups(result.items || []) }
+    catch (e) { setError(e.message) } finally { setBusy(false) }
+  }
+
+  function addDiscoveredGroup(group) {
+    if (!settings) return
+    const current = Array.isArray(settings.class_assistant_groups) ? settings.class_assistant_groups : []
+    if (!current.includes(group.chat_id)) setSettings({ ...settings, class_assistant_groups: [...current, group.chat_id] })
   }
 
   useEffect(() => { refresh(); const timer = setInterval(refresh, 30000); return () => clearInterval(timer) }, [refresh])
@@ -137,6 +150,11 @@ export default function ClassAssistantPanel() {
           <label className="flex items-center gap-2"><input type="checkbox" checked={!!settings.real_send_enabled} onChange={e => setSettings({ ...settings, real_send_enabled: e.target.checked })} />允许真实发送（高风险）</label>
           <label className="md:col-span-2"><span className="block text-xs text-text-muted mb-1">白名单群 chat_id（逗号分隔，禁止 *）</span><input className="w-full px-3 py-2 rounded-md bg-bg-main border border-border-main" value={Array.isArray(settings.class_assistant_groups) ? settings.class_assistant_groups.join(',') : (settings.class_assistant_groups || '')} onChange={e => setSettings({ ...settings, class_assistant_groups: e.target.value.split(',').map(v => v.trim()).filter(Boolean) })} /></label>
         </div>}
+      </section>
+
+      <section className="p-5 rounded-xl bg-bg-raised border border-border-main space-y-3">
+        <div className="flex items-center justify-between"><div><h4 className="font-semibold text-text-main">发现群</h4><p className="text-xs text-text-muted mt-1">只读取群元数据，不读取消息。</p></div><button onClick={discoverGroups} disabled={busy} className="px-3 py-1.5 rounded-md border border-border-main text-xs disabled:opacity-50">发现群</button></div>
+        {discoveredGroups.map(group => <div key={group.chat_id} className="flex items-center justify-between gap-3 text-sm"><span className="text-text-main">{group.display_name} · {group.member_count} 人 <span className="text-text-muted">({group.chat_id})</span></span><button onClick={() => addDiscoveredGroup(group)} disabled={busy || !settings} className="px-2 py-1 rounded border border-border-main text-xs">加入白名单</button></div>)}
       </section>
 
       <section className="p-5 rounded-xl bg-bg-raised border border-border-main">

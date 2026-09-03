@@ -281,3 +281,16 @@ def test_disabled_group_whitelist_row_blocks_collection(tmp_path):
     storage.conn.commit()
     service.handle(message("disabled"))
     assert storage.count_messages() == 0
+
+
+def test_discover_groups_uses_injected_read_only_metadata_provider(tmp_path):
+    calls = []
+    service = ClassAssistantService(
+        Config(), storage=Storage(str(tmp_path / "assistant.db")),
+        group_discoverer=lambda: calls.append("discover") or [{
+            "chat_id": "class@chatroom", "display_name": "Class", "member_count": 42,
+            "members": ["must not leak"],
+        }],
+    )
+    assert service.discover_groups() == [{"chat_id": "class@chatroom", "display_name": "Class", "member_count": 42}]
+    assert calls == ["discover"]

@@ -267,6 +267,7 @@ class Bot:
                 summarizer=summarizer,
                 sender=backend.send_text,
                 window_validator=getattr(backend, "validate_send_target", None),
+                group_discoverer=getattr(backend, "discover_group_metadata", None),
             )
             self._class_assistant.start()
             try:

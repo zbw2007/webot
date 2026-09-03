@@ -77,3 +77,17 @@ def test_reconcile_endpoint_requires_sending_state(tmp_path):
     })
     response = call_api(service, "/api/class-assistant/drafts/draft-1/mark-sent", "POST", {"version": 1})
     assert response["ok"] is False
+
+
+def test_group_discovery_api_returns_metadata_only_and_does_not_read_messages(tmp_path):
+    calls = []
+    service = ClassAssistantService(
+        Config(), storage=Storage(str(tmp_path / "assistant.db")),
+        group_discoverer=lambda: calls.append("metadata") or [{
+            "chat_id": "class@chatroom", "display_name": "Class", "member_count": 4,
+            "members": ["secret"], "messages": ["secret"],
+        }],
+    )
+    response = call_api(service, "/api/class-assistant/groups/discover", "POST", {})
+    assert response == {"ok": True, "items": [{"chat_id": "class@chatroom", "display_name": "Class", "member_count": 4}]}
+    assert calls == ["metadata"]

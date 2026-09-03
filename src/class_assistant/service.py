@@ -42,6 +42,7 @@ class ClassAssistantService:
         window_validator: Callable[[str, str], bool] | None = None,
         summarizer: Any | None = None,
         now: Callable[[], float] | None = None,
+        group_discoverer: Callable[[], list[dict]] | None = None,
     ) -> None:
         self.config = config
         self._storage = storage or Storage(getattr(config, "db_path", "data/messages.db"))
@@ -60,6 +61,7 @@ class ClassAssistantService:
         self._window_validator = window_validator
         self._clock = now or time.time
         self._summarizer = summarizer
+        self._group_discoverer = group_discoverer
         self._running = False
         self._thread: threading.Thread | None = None
         self._messages_processed = 0
@@ -87,6 +89,15 @@ class ClassAssistantService:
     @property
     def storage(self) -> Storage:
         return self._storage
+
+    def discover_groups(self) -> list[dict]:
+        if self._group_discoverer is None:
+            raise RuntimeError("group discovery backend is not ready")
+        return [
+            {"chat_id": str(item["chat_id"]), "display_name": str(item["display_name"]),
+             "member_count": int(item["member_count"])}
+            for item in self._group_discoverer()
+        ]
 
     def _group_allowed(self, chat_id: Any, is_group: bool) -> bool:
         """Apply both the immutable config whitelist and DB enable flag."""
