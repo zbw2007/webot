@@ -55,7 +55,16 @@ def test_send_api_requires_version_and_confirmation_token(tmp_path):
     service.approve_draft("draft-1", 1)
     response = call_api(service, "/api/class-assistant/drafts/draft-1/send", "POST", {"version": 1})
     assert response["ok"] is False
-    assert "confirmation_token" in response["error"]
+    assert response["error"] == "invalid class assistant request"
+
+
+def test_class_assistant_api_generic_errors_use_safe_message(tmp_path):
+    service = ClassAssistantService(Config(), storage=Storage(str(tmp_path / "assistant.db")))
+    service.status = lambda: (_ for _ in ()).throw(
+        RuntimeError("secret path C:\\private\\assistant.db api-key=top-secret")
+    )
+    response = call_api(service, "/api/class-assistant/status")
+    assert response == {"ok": False, "error": "class assistant operation unavailable"}
 
 
 def test_emergency_stop_blocks_future_collection(tmp_path):

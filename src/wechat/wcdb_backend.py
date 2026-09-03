@@ -652,7 +652,8 @@ class WcdbBackend(AbstractWeChatBackend):
             ts = int(time.time())
 
         # Resolve sender display name
-        sender_name = self._client.resolve_nickname(sender)
+        with self._client_lock:
+            sender_name = self._client.resolve_nickname(sender)
 
         # Fallback: if WCDB DLL can't resolve (user not in contacts),
         # try the messages table for a previously seen display name
@@ -666,7 +667,8 @@ class WcdbBackend(AbstractWeChatBackend):
         if "@" in content:
             def _replace_at(match):
                 at_wxid = match.group(0)[1:]
-                name = self._client.resolve_nickname(at_wxid)
+                with self._client_lock:
+                    name = self._client.resolve_nickname(at_wxid)
                 return f"@{name}" if name != at_wxid else match.group(0)
             resolved_content = re.sub(r'@wxid_[a-zA-Z0-9]+', _replace_at, content)
 

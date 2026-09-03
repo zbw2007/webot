@@ -36,6 +36,11 @@ class LifecycleClient:
             self.invalid_calls_during_close.append("get_group_members")
         return []
 
+    def resolve_nickname(self, _username):
+        if self.closed.is_set():
+            self.invalid_calls_during_close.append("resolve_nickname")
+        return "resolved"
+
 
 def test_reinitialize_serializes_close_and_discovery_client_calls(monkeypatch):
     closed = threading.Event()
@@ -58,4 +63,30 @@ def test_reinitialize_serializes_close_and_discovery_client_calls(monkeypatch):
     discovery.join(timeout=2)
     assert not reinit.is_alive()
     assert not discovery.is_alive()
+    assert old_client.invalid_calls_during_close == []
+
+
+def test_standardize_serializes_nickname_resolution_with_reinitialize(monkeypatch):
+    closed = threading.Event()
+    old_client = LifecycleClient(closed)
+    new_client = LifecycleClient(threading.Event())
+    backend = WcdbBackend(groups=["class@chatroom"])
+    backend._client = old_client
+    backend._running = True
+    monkeypatch.setattr(wcdb_backend, "WcdbNativeClient", lambda: new_client)
+    monkeypatch.setattr(backend._window, "find_hwnd", lambda: None)
+
+    reinit = threading.Thread(target=backend._reinitialize)
+    reinit.start()
+    assert old_client.close_started.wait(timeout=2)
+    standardize = threading.Thread(target=lambda: backend._standardize(
+        {"sender_username": "wxid_sender", "content": "hello", "timestamp": 1},
+        "class@chatroom", "class@chatroom",
+    ))
+    standardize.start()
+    old_client.release_close.set()
+    reinit.join(timeout=2)
+    standardize.join(timeout=2)
+    assert not reinit.is_alive()
+    assert not standardize.is_alive()
     assert old_client.invalid_calls_during_close == []
