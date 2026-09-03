@@ -1,5 +1,6 @@
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -71,6 +72,49 @@ def test_run_digest_persists_todo_and_reply_draft_without_sending(tmp_path):
     assert drafts[0]["source_message_id"] == "m1"
     service.approve_draft(drafts[0]["id"], version=1)
     assert service.send_draft(drafts[0]["id"], confirmation_token=None)["dry_run"] is True
+
+
+def test_offline_workflow_two_whitelisted_groups_has_sources_and_never_calls_sender(tmp_path):
+    storage = Storage(str(tmp_path / "assistant.db"))
+    config = Config()
+    config.class_assistant_groups = ["class@chatroom", "second@chatroom"]
+    sender_calls = []
+
+    def model(messages):
+        chat_id = messages[0]["chat_id"]
+        return {
+            "summary": chat_id,
+            "todos": [{"title": f"{chat_id} 待办", "source_message_id": messages[0]["message_id"]}],
+            "reply_candidates": [{"text": f"已收到 {chat_id}", "source_message_id": messages[0]["message_id"]}],
+        }
+
+    service = ClassAssistantService(
+        config, storage=storage, model_call=model,
+        sender=lambda chat_id, text: sender_calls.append((chat_id, text)),
+    )
+    service.handle(message("m-class", "class@chatroom", timestamp=100))
+    service.handle(message("m-second", "second@chatroom", timestamp=100))
+    service.handle(message("m-private", "teacher", False, timestamp=101))
+    service.handle(message("m-other", "other@chatroom", timestamp=102))
+
+    assert service.run_digest(
+        now=datetime.fromisoformat("2026-09-02T20:01:00+08:00"), force=True
+    )["status"] == "succeeded"
+    assert {row["group_id"] for row in storage.query("todo_items")} == {
+        "class@chatroom", "second@chatroom"
+    }
+    drafts = storage.query("reply_drafts")
+    assert {row["chat_id"] for row in drafts} == {"class@chatroom", "second@chatroom"}
+    assert {row["source_message_id"] for row in drafts} == {"m-class", "m-second"}
+    assert all(row["status"] == "pending_review" for row in drafts)
+    assert config.class_assistant_real_send_enabled is False
+    assert config.class_assistant_dry_run is True
+
+    for draft in drafts:
+        service.approve_draft(draft["id"], version=1)
+        assert service.send_draft(draft["id"], version=1, confirmation_token=None)["dry_run"]
+    assert sender_calls == []
+    assert storage.count_messages() == 2
 
 
 def test_failed_digest_does_not_mark_success(tmp_path):
@@ -251,6 +295,77 @@ def test_real_send_claim_is_atomic_and_reconcile_is_explicit(tmp_path):
     assert service.send_draft("draft-claim", version=1, confirmation_token=token)["sent"] is True
     with pytest.raises(ValueError):
         service.reconcile_draft("draft-claim", 1, "sent")
+
+
+def test_real_send_two_threads_only_one_claims_and_sender_runs_once(tmp_path):
+    storage = Storage(str(tmp_path / "assistant.db"))
+    config = Config()
+    config.class_assistant_dry_run = False
+    config.class_assistant_real_send_enabled = True
+    sender_calls = []
+    service = ClassAssistantService(
+        config, storage=storage,
+        sender=lambda chat_id, text: sender_calls.append((chat_id, text)) or True,
+        window_validator=lambda _chat, _group: True,
+    )
+    storage.insert_reply_draft({
+        "id": "draft-concurrent", "version": 1, "chat_id": "class@chatroom",
+        "group_name": "Class", "text": "收到", "status": "pending_review",
+        "risk_level": "low",
+    })
+    service.approve_draft("draft-concurrent", version=1)
+
+    def attempt():
+        try:
+            return service.send_draft(
+                "draft-concurrent", version=1,
+                confirmation_token=service.issue_confirmation_token(),
+            )
+        except Exception as exc:  # one loser is expected at the atomic claim
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _unused: attempt(), (1, 2)))
+    assert sum(isinstance(result, dict) and result.get("sent") is True for result in results) == 1
+    assert sum(isinstance(result, Exception) for result in results) == 1
+    assert len(sender_calls) == 1
+    assert storage.query("reply_drafts", status="sent")
+
+
+def test_failed_real_send_requires_explicit_reconciliation_and_never_retries(tmp_path):
+    storage = Storage(str(tmp_path / "assistant.db"))
+    config = Config()
+    config.class_assistant_dry_run = False
+    config.class_assistant_real_send_enabled = True
+    sender_calls = []
+
+    def broken_sender(_chat_id, _text):
+        sender_calls.append(True)
+        raise RuntimeError("uncertain window failure")
+
+    service = ClassAssistantService(
+        config, storage=storage, sender=broken_sender,
+        window_validator=lambda _chat, _group: True,
+    )
+    storage.insert_reply_draft({
+        "id": "draft-reconcile", "version": 1, "chat_id": "class@chatroom",
+        "group_name": "Class", "text": "收到", "status": "pending_review",
+        "risk_level": "low",
+    })
+    service.approve_draft("draft-reconcile", version=1)
+    with pytest.raises(RuntimeError):
+        service.send_draft(
+            "draft-reconcile", version=1,
+            confirmation_token=service.issue_confirmation_token(),
+        )
+    assert storage.query("reply_drafts", status="sending")
+    assert service.reconcile_draft("draft-reconcile", 1, "failed")["status"] == "needs_reconciliation"
+    with pytest.raises(ValueError):
+        service.send_draft(
+            "draft-reconcile", version=1,
+            confirmation_token=service.issue_confirmation_token(),
+        )
+    assert sender_calls == [True]
 
 
 def test_real_send_requires_backend_window_validation(tmp_path):

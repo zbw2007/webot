@@ -5,9 +5,9 @@
 - 执行日期：2026-09-03（Asia/Shanghai）
 - 工作目录：`C:\Users\27032\WeBot-ClassAssistant`
 - 上游：`https://github.com/GuMu599/webot.git`
-- 基线 commit：`7686c800b8b059f175f7cc44e6608762d31228ca`
+- 基线 commit：`19b82a2f941eeebcaed37e386c34c96bba69a23d`
 - 当前分支：`feature/class-assistant`
-- 当前 HEAD：`7686c800b8b059f175f7cc44e6608762d31228ca`
+- 当前 HEAD：`07a9dcbba1bf70a80191ec41499c4e07e3c61e43`
 - GitHub Fork：`https://github.com/zbw2007/webot.git`
 - Fork 推送日期：2026-09-03（Asia/Shanghai）
 - 初始 Git 状态：下载后工作树干净；CowAgent 目录未触碰。
@@ -34,7 +34,7 @@ pip check -> No broken requirements found.
 
 上游全量测试仍有与本功能无关的既有失败：`MAX_RETRIES` 校验、Feishu secret 展示断言，以及浅克隆缺少 macOS 工具文件导致的测试失败。没有修改这些基线问题。
 
-前端 `npm install` 已使用 npmjs 与 npmmirror/清华镜像多次尝试，均因网络长时间无响应而中止；当前没有 `ui/node_modules`，所以尚未生成 `ui/dist`，也没有宣称前端构建通过。
+阶段一至四提交：`4f60227`（Fork/基线记录）、`376c30d`（前端锁定）、`89b929e` 至 `07a9dcb`（WCDB preflight、只读群元数据发现、生命周期及日志脱敏加固）。前端使用 npm 官方源完成安装并生成 `ui/package-lock.json`；`npm audit --omit=dev` 报告 0 vulnerabilities，`npm run build` 已通过（仅有 Vite CommonJS 配置和 chunk 体积提示）。
 
 ## 安全状态
 
@@ -52,3 +52,13 @@ pip check -> No broken requirements found.
 3. 解决前端依赖网络问题并运行 `npm run build`。
 4. 配置稳定的班级群 `chat_id`，保持真实发送关闭，完成“测试群只读 48 小时 → 正式群只读 48 小时 → 测试群模拟发送 48 小时”。
 5. 只有人工审核和窗口验证均通过后，才由用户在本地控制台手动开启真实发送。
+
+## Checkpoint 5：离线验收
+
+- 专项测试覆盖白名单采集、私聊/非白名单拒绝、两个群独立分析、待办和草稿来源关联、编辑撤销旧批准、批准与一次性确认令牌、DRY_RUN 模拟发送（注入 sender 调用次数为 0）。
+- 覆盖真实发送模式下的原子 claim 竞争：同一批准版本两个线程只有一个成功，sender 只调用一次。
+- 覆盖发送器异常后的 `sending` 保留、显式失败对账为 `needs_reconciliation`，以及后续调用不会自动重发。
+- DeepSeek/model 失败保持分析游标不变且不产生可发送草稿；非法 JSON 只重试一次。
+- 本次离线验收：`pytest tests/class_assistant -q` → `97 passed`；`python -m compileall -q src tests`、`pip check`、`git diff --check` 均通过；前端 `npm run build` 通过。
+- 当前保持 `CLASS_ASSISTANT_ENABLED=false`、`REAL_SEND_ENABLED=false`、`DRY_RUN=true`，未连接主微信、未读取真实群消息、未操作发送器。
+- 48 小时外部测试仍未完成；可信 WCDB DLL 来源、签名、批准哈希和微信版本兼容性仍未确认，因此不能启动真实采集或进入真实账号上线阶段。
