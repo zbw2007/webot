@@ -109,14 +109,14 @@ class WcdbBackend(AbstractWeChatBackend):
         except Exception as e:
             if isinstance(e, (KeyboardInterrupt, SystemExit)):
                 raise
-            logger.error("Failed to initialize WCDB: %s", e)
+            logger.error("WCDB initialization failed")
             # If init() allocated DLL/WCDB engine but open() failed,
             # clean up native resources so repeated retries don't leak.
             with self._client_lock:
                 self._close_client_locked()
             try:
                 from src.web.server import update_status
-                update_status(running=False, error=str(e))
+                update_status(running=False, error="WCDB initialization failed")
             except Exception:
                 pass
             return
@@ -159,11 +159,9 @@ class WcdbBackend(AbstractWeChatBackend):
                             consecutive_errors = 0
                             continue
                         except Exception as reinit_err:
-                            logger.error(
-                                "Reinitialization failed: %s", reinit_err,
-                            )
+                            logger.error("WCDB reinitialization failed")
                             # Fall through to backoff; will retry next cycle.
-                            push_error = str(reinit_err)
+                            push_error = "WCDB reinitialization failed"
                             try:
                                 from src.web.server import update_status
                                 update_status(error=push_error)
@@ -172,8 +170,8 @@ class WcdbBackend(AbstractWeChatBackend):
 
                     wait = min(2 ** min(consecutive_errors % MAX_CONSECUTIVE_ERRORS, 5), 30)
                     logger.warning(
-                        "Poll error #%d (%s): %s. Retry in %ss...",
-                        consecutive_errors, type(e).__name__, e, wait,
+                        "WCDB poll error #%d. Retry in %ss...",
+                        consecutive_errors, wait,
                     )
                     time.sleep(wait)
         finally:
@@ -203,7 +201,7 @@ class WcdbBackend(AbstractWeChatBackend):
 
         group_name = self._talker_to_name(chat_id)
         if not group_name:
-            logger.error("Cannot resolve chat_id=%s to group name", chat_id)
+            logger.error("Cannot resolve send target")
             return False
 
         return self._send_and_confirm(group_name, chat_id, content)
@@ -228,7 +226,7 @@ class WcdbBackend(AbstractWeChatBackend):
                 return False
             return bool(self._window._verify_chat_title(hwnd, group_name))
         except Exception:
-            logger.exception("Failed to validate real-send target chat_id=%s", chat_id)
+            logger.error("Failed to validate real-send target")
             return False
 
     def stop(self) -> None:
@@ -260,7 +258,7 @@ class WcdbBackend(AbstractWeChatBackend):
                 # Re-resolve groups (talker IDs may have changed)
                 self._resolve_groups()
             except Exception as e:
-                logger.error("WCDB reinitialization failed: %s", e)
+                logger.error("WCDB reinitialization failed")
                 # A partially initialized replacement client is unsafe to
                 # retain, and its mappings must never fall back to the old
                 # client snapshot.
@@ -347,10 +345,7 @@ class WcdbBackend(AbstractWeChatBackend):
         if auto_discover:
             for username, info in all_chatrooms.items():
                 resolved_talker_ids[info["name"]] = username
-            logger.info(
-                "Auto-discovered %d group chats: %s",
-                len(resolved_talker_ids), list(resolved_talker_ids.keys()),
-            )
+            logger.info("Auto-discovered %d group chats", len(resolved_talker_ids))
             self._groups = list(resolved_talker_ids.keys())
 
         else:
@@ -365,7 +360,7 @@ class WcdbBackend(AbstractWeChatBackend):
                     display = all_chatrooms[group_name]["name"]
                     if display and display != group_name:
                         resolved_talker_ids[display] = group_name
-                    logger.info("Resolved '%s' as direct username", group_name)
+                    logger.info("Resolved configured group as direct username")
                     continue
 
                 exact = [username for username, info in all_chatrooms.items()
@@ -378,14 +373,11 @@ class WcdbBackend(AbstractWeChatBackend):
                 if len(candidates) == 1:
                     found = candidates[0]
                     resolved_talker_ids[group_name] = found
-                    logger.info("Resolved '%s' -> %s (display='%s')", group_name, found, all_chatrooms[found]["name"])
+                    logger.info("Resolved configured group")
                 elif len(candidates) > 1:
-                    logger.error("Refusing ambiguous group '%s'; matches=%s", group_name, candidates)
+                    logger.error("Refusing ambiguous configured group; matches=%d", len(candidates))
                 else:
-                    logger.warning(
-                        "Could not resolve group '%s'. Available: %s",
-                        group_name, list(all_chatrooms.keys()),
-                    )
+                    logger.warning("Could not resolve configured group")
 
         # Commit only after complete resolution so an exception cannot expose
         # a partial mapping from this client.
@@ -416,12 +408,9 @@ class WcdbBackend(AbstractWeChatBackend):
                     wxid: names.get(wxid, wxid)
                     for wxid in wxids
                 }
-                logger.info(
-                    "Resolved %d/%d member names for %s",
-                    len(group_members[username]), len(wxids), info["name"],
-                )
-            except Exception as e:
-                logger.warning("Failed to resolve members for %s: %s", username, e)
+                logger.info("Resolved %d/%d member names", len(group_members[username]), len(wxids))
+            except Exception:
+                logger.warning("Failed to resolve group members")
         if group_members:
             self._save_group_members(group_members)
 
@@ -444,9 +433,9 @@ class WcdbBackend(AbstractWeChatBackend):
             tmp_path.write_text(data, encoding="utf-8")
             _os.replace(tmp_path, path)
             total = sum(len(m) for m in chat_members.values())
-            logger.info("Saved %d member names across %d groups to %s", total, len(chat_members), path)
-        except Exception as e:
-            logger.warning("Failed to persist group_members.json: %s", e)
+            logger.info("Saved %d member names across %d groups", total, len(chat_members))
+        except Exception:
+            logger.warning("Failed to persist group members")
 
     @staticmethod
     def _save_group_names(chatrooms: dict[str, dict]) -> None:
@@ -459,12 +448,9 @@ class WcdbBackend(AbstractWeChatBackend):
             data = json.dumps(chatrooms, ensure_ascii=False, indent=2)
             tmp_path.write_text(data, encoding="utf-8")
             _os.replace(tmp_path, path)
-            logger.info(
-                "Saved %d group-name mappings to %s",
-                len(chatrooms), path,
-            )
-        except Exception as e:
-            logger.warning("Failed to persist group_names.json: %s", e)
+            logger.info("Saved %d group-name mappings", len(chatrooms))
+        except Exception:
+            logger.warning("Failed to persist group names")
 
     def _talker_to_name(self, talker_id: str) -> str:
         fallback = ""

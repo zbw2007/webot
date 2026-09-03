@@ -386,8 +386,11 @@ class ClassAssistantService:
             self._last_error = None
             return {"status": "succeeded", "scheduled_slot": slot, "summary": "\n".join(summaries)}
         except Exception as exc:
-            self._last_error = str(exc)
-            logger.exception("Class-assistant digest failed")
+            # Never expose provider errors: they may contain API payloads,
+            # local paths, or message content.
+            safe_error = "class assistant digest failed"
+            self._last_error = safe_error
+            logger.error(safe_error)
             self._storage.insert_digest_run({
                 "run_id": run_id,
                 "scheduled_slot": slot,
@@ -397,9 +400,9 @@ class ClassAssistantService:
                 "window_end": locals().get("window_end"),
                 "started_at": started,
                 "completed_at": int(self._clock()),
-                "error": str(exc),
+                "error": safe_error,
             })
-            return {"status": "failed", "scheduled_slot": slot, "error": str(exc)}
+            return {"status": "failed", "scheduled_slot": slot, "error": safe_error}
 
     def _latest_draft(self, draft_id: str) -> dict[str, Any] | None:
         rows = self._storage.query("reply_drafts", id=draft_id)
@@ -497,7 +500,7 @@ class ClassAssistantService:
                 before_send=_before_send,
             )
         except Exception as exc:
-            self._storage.insert_audit({"draft_id": draft_id, "action": "send_failed", "actor": "local", "details": json.dumps({"version": int(draft["version"]), "error": str(exc)})})
+            self._storage.insert_audit({"draft_id": draft_id, "action": "send_failed", "actor": "local", "details": json.dumps({"version": int(draft["version"]), "error": "class assistant send failed"})})
             raise
         if payload.get("dry_run"):
             self._storage.insert_audit({"draft_id": draft_id, "action": "send_dry_run", "actor": "local", "details": f"version={draft['version']}"})
