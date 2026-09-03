@@ -68,6 +68,16 @@ CREATE TABLE IF NOT EXISTS group_memory (
 
 CREATE INDEX IF NOT EXISTS idx_trigger_chat_time
     ON trigger_log(chat_id, processed_at DESC);
+
+-- Durable compound cursor for native backend polling.
+CREATE TABLE IF NOT EXISTS backend_poll_cursors (
+    backend TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    message_id TEXT NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    PRIMARY KEY (backend, chat_id)
+);
 """
 
 

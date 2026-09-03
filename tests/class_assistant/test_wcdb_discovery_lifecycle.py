@@ -317,7 +317,9 @@ def test_poll_group_reads_all_pages_and_deduplicates_on_next_poll():
     backend._poll_group("class@chatroom", "class@chatroom", received.append)
 
     assert [offset for _, _, offset in client.offsets[:3]] == [0, 50, 100]
-    assert [offset for _, _, offset in client.offsets[3:]] == [0]
+    # The first multi-page scan performs a boundary verification at offset 0;
+    # the next poll then reads its first page once.
+    assert [offset for _, _, offset in client.offsets[3:]] == [0, 0]
     assert len(received) == 120
     assert len({message["message_id"] for message in received}) == 120
 
@@ -343,6 +345,38 @@ def test_poll_group_second_round_stops_at_cursor_and_reads_new_message():
     assert [offset for _, _, offset in client.offsets] == [0]
     assert [message["content"] for message in received].count("new") == 1
     assert len(received) == 121
+
+
+def test_poll_group_rescans_when_newest_first_pagination_shifts():
+    class InsertingPagingClient(PagingClient):
+        def __init__(self, messages):
+            super().__init__(messages)
+            self.inserted = False
+
+        def get_messages(self, talker, limit=50, offset=0):
+            page = super().get_messages(talker, limit, offset)
+            if offset == 50 and not self.inserted:
+                self.messages.append({
+                    "sender_username": "wxid_sender", "content": "arrived",
+                    "timestamp": 121, "server_id": "arrived",
+                })
+                self.inserted = True
+            return page
+
+    messages = [
+        {"sender_username": "wxid_sender", "content": f"message {i}",
+         "timestamp": i, "server_id": str(i)}
+        for i in range(120)
+    ]
+    client = InsertingPagingClient(messages)
+    backend = WcdbBackend(groups=["class@chatroom"])
+    backend._client = client
+    backend._running = True
+    received = []
+    backend._poll_group("class@chatroom", "class@chatroom", received.append)
+    assert {message["content"] for message in received} == {
+        *(f"message {i}" for i in range(120)), "arrived"
+    }
 
 
 def test_poll_group_restores_cursor_from_shared_store():
@@ -408,3 +442,74 @@ def test_poll_group_keeps_same_timestamp_messages_after_compound_cursor():
 
     assert len(received) == before + 1
     assert received[-1]["content"] == "third"
+
+
+def test_poll_group_retries_when_callback_fails_before_delivery():
+    client = PagingClient([{
+        "sender_username": "wxid_sender", "content": "retry",
+        "timestamp": 1, "server_id": "retry",
+    }])
+    backend = WcdbBackend(groups=["class@chatroom"])
+    backend._client = client
+    backend._running = True
+    attempts = []
+
+    def callback(message):
+        attempts.append(message["content"])
+        if len(attempts) == 1:
+            raise RuntimeError("temporary persistence failure")
+
+    backend._poll_group("class@chatroom", "class@chatroom", callback)
+    assert attempts == ["retry"]
+    assert backend._poll_cursors == {}
+    backend._poll_group("class@chatroom", "class@chatroom", callback)
+    assert attempts == ["retry", "retry"]
+    assert backend._poll_cursors["class@chatroom"][0] == 1
+
+
+def test_poll_group_does_not_duplicate_inflight_callback():
+    client = PagingClient([{
+        "sender_username": "wxid_sender", "content": "slow",
+        "timestamp": 1, "server_id": "slow",
+    }])
+    backend = WcdbBackend(groups=["class@chatroom"])
+    backend._client = client
+    backend._running = True
+    started = threading.Event()
+    release = threading.Event()
+    attempts = []
+
+    def callback(message):
+        attempts.append(message["content"])
+        started.set()
+        release.wait(timeout=2)
+
+    worker = threading.Thread(target=backend._handle_message, args=(
+        "class@chatroom", "class@chatroom",
+        backend._standardize(client.messages[0], "class@chatroom", "class@chatroom"),
+        callback,
+    ))
+    message_id = backend._standardize(
+        client.messages[0], "class@chatroom", "class@chatroom"
+    )["message_id"]
+    backend._reserve_inflight("class@chatroom", message_id)
+    worker.start()
+    assert started.wait(timeout=1)
+    backend._poll_group("class@chatroom", "class@chatroom", callback)
+    release.set()
+    worker.join(timeout=2)
+    assert attempts == ["slow"]
+
+
+def test_message_store_poll_cursor_is_monotonic_and_persistent(tmp_path):
+    from src.db import MessageStore, initialize_db
+
+    conn = initialize_db(str(tmp_path / "messages.db"))
+    store = MessageStore(conn)
+    assert store.get_poll_cursor("class@chatroom") is None
+    assert store.save_poll_cursor("class@chatroom", 10, "z") is True
+    assert store.save_poll_cursor("class@chatroom", 9, "later") is False
+    assert store.get_poll_cursor("class@chatroom") == (10, "z")
+    conn.close()
+    conn2 = initialize_db(str(tmp_path / "messages.db"))
+    assert MessageStore(conn2).get_poll_cursor("class@chatroom") == (10, "z")

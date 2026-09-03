@@ -135,6 +135,39 @@ class MessageStore:
             ).fetchone()
             return row["sender_name"] if row else None
 
+    def get_poll_cursor(self, chat_id: str, backend: str = "wcdb"):
+        """Return the durable compound cursor for a backend/chat pair."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT timestamp, message_id FROM backend_poll_cursors "
+                "WHERE backend = ? AND chat_id = ?",
+                (str(backend), str(chat_id)),
+            ).fetchone()
+            return (int(row["timestamp"]), str(row["message_id"])) if row else None
+
+    def save_poll_cursor(self, chat_id: str, timestamp: int, message_id: str,
+                         backend: str = "wcdb") -> bool:
+        """Advance a cursor only when its compound position is newer."""
+        position = (int(timestamp), str(message_id))
+        with self._lock:
+            current = self.conn.execute(
+                "SELECT timestamp, message_id FROM backend_poll_cursors "
+                "WHERE backend = ? AND chat_id = ?",
+                (str(backend), str(chat_id)),
+            ).fetchone()
+            if current and position <= (int(current["timestamp"]), str(current["message_id"])):
+                return False
+            with self.conn:
+                self.conn.execute(
+                    "INSERT INTO backend_poll_cursors "
+                    "(backend, chat_id, timestamp, message_id) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(backend, chat_id) DO UPDATE SET "
+                    "timestamp=excluded.timestamp, message_id=excluded.message_id, "
+                    "updated_at=strftime('%s','now')",
+                    (str(backend), str(chat_id), position[0], position[1]),
+                )
+            return True
+
     def get_user_last_timestamp(self, chat_id: str,
                                 sender_id: str) -> Optional[int]:
         """Get the Unix timestamp of a user's most recent message in a chat."""

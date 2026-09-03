@@ -75,6 +75,8 @@ class WcdbBackend(AbstractWeChatBackend):
         # Last delivered (timestamp, message id) per group.  The in-memory
         # DedupSet remains the authoritative guard for replayed pages.
         self._poll_cursors: dict[str, tuple[int, str]] = {}
+        self._state_lock = threading.Lock()
+        self._inflight: set[tuple[str, str]] = set()
         # Thread safety: WCDB DLL (ctypes) may not be thread-safe internally.
         # All _client calls are serialized through this lock.
         self._client_lock = threading.Lock()
@@ -107,14 +109,45 @@ class WcdbBackend(AbstractWeChatBackend):
         except (TypeError, ValueError, KeyError):
             return (0, "")
 
-    def _save_poll_cursor(self, talker: str, cursor: tuple[int, str]) -> None:
-        self._poll_cursors[talker] = cursor
+    def _save_poll_cursor(self, talker: str, cursor: tuple[int, str]) -> bool:
         saver = getattr(self._store, "save_poll_cursor", None)
         if callable(saver):
             try:
-                saver(talker, cursor[0], cursor[1])
+                result = saver(talker, cursor[0], cursor[1])
+                if result is False:
+                    return False
             except Exception:
                 logger.warning("Failed to persist polling cursor")
+                return False
+        self._poll_cursors[talker] = cursor
+        return True
+
+    def _reserve_inflight(self, talker: str, message_id: str) -> bool:
+        key = (talker, message_id)
+        with self._state_lock:
+            if message_id in self._known_ids or key in self._inflight:
+                return False
+            self._inflight.add(key)
+            return True
+
+    def _finish_inflight(self, talker: str, message_id: str,
+                         standardized: dict, success: bool) -> None:
+        key = (talker, message_id)
+        with self._state_lock:
+            self._inflight.discard(key)
+        if not success:
+            return
+        position = (int(standardized["timestamp"]), str(message_id))
+        persisted = self._save_poll_cursor(talker, position)
+        # A durable store may report False for an older concurrent write.  If
+        # its cursor is already at/after this message, delivery is complete;
+        # only an actual persistence error should leave it retryable.
+        if not persisted:
+            current = self._load_poll_cursor(talker)
+            persisted = current >= position
+        if persisted:
+            with self._state_lock:
+                self._known_ids.add(message_id)
 
     # ── Public API ─────────────────────────────────────────────────
 
@@ -534,29 +567,42 @@ class WcdbBackend(AbstractWeChatBackend):
         # messages.  The complete boundary page is still examined so messages
         # sharing a timestamp are not skipped.
         page_size = 50
-        offset = 0
         cursor = self._load_poll_cursor(talker)
         standardized_messages = []
-        while True:
+        # Offset pagination is unstable when new rows arrive at the front.
+        # Rescan if the first-page boundary moved while this snapshot was read.
+        for _attempt in range(3):
+            offset = 0
+            standardized_messages = []
+            first_boundary = None
+            while True:
+                with self._client_lock:
+                    page = self._client.get_messages(
+                        talker=talker, limit=page_size, offset=offset,
+                    )
+                if not page:
+                    break
+                if offset == 0 and page:
+                    first_boundary = repr(page[0])
+                offset += len(page)
+                page_records = []
+                for raw in page:
+                    standardized = self._standardize(raw, group_name, talker)
+                    if standardized is not None:
+                        page_records.append(standardized)
+                standardized_messages.extend(page_records)
+                if cursor != (0, "") and any(
+                    (int(item["timestamp"]), str(item["message_id"])) <= cursor
+                    for item in page_records
+                ):
+                    break
+                if len(page) < page_size:
+                    break
+            if offset <= page_size:
+                break
             with self._client_lock:
-                page = self._client.get_messages(
-                    talker=talker, limit=page_size, offset=offset,
-                )
-            if not page:
-                break
-            offset += len(page)
-            page_records = []
-            for raw in page:
-                standardized = self._standardize(raw, group_name, talker)
-                if standardized is not None:
-                    page_records.append(standardized)
-            standardized_messages.extend(page_records)
-            if cursor != (0, "") and any(
-                (int(item["timestamp"]), str(item["message_id"])) <= cursor
-                for item in page_records
-            ):
-                break
-            if len(page) < page_size:
+                check = self._client.get_messages(talker=talker, limit=1, offset=0)
+            if not check or repr(check[0]) == first_boundary:
                 break
         if not standardized_messages:
             return
@@ -577,14 +623,11 @@ class WcdbBackend(AbstractWeChatBackend):
                 break
 
             msg_id = standardized["message_id"]
-            if msg_id in self._known_ids:
+            if not self._reserve_inflight(talker, msg_id):
                 continue
-            self._known_ids.add(msg_id)
-            self._save_poll_cursor(talker, (
-                int(standardized["timestamp"]), msg_id,
-            ))
 
             if self._bot_name and self._bot_name in standardized["sender_name"]:
+                self._finish_inflight(talker, msg_id, standardized, True)
                 continue
 
             self._trim_dedup()
@@ -606,8 +649,10 @@ class WcdbBackend(AbstractWeChatBackend):
                         standardized: dict, callback: MessageCallback) -> None:
         """Execute callback and send reply (runs in thread pool worker)."""
         if not self._running:
+            self._finish_inflight(talker, standardized["message_id"], standardized, False)
             return
 
+        success = False
         try:
             cb_start = time.monotonic()
             reply = callback(standardized)
@@ -620,13 +665,18 @@ class WcdbBackend(AbstractWeChatBackend):
                 # _send_and_confirm uses window_controller (keyboard), not
                 # _client (WCDB).  Don't hold _client_lock during send —
                 # it blocks the poll loop from reading new messages.
-                success = self._send_and_confirm(group_name, talker, reply)
-                if success:
+                sent = self._send_and_confirm(group_name, talker, reply)
+                if sent:
+                    success = True
                     logger.info("Reply sent; chars=%d", len(reply))
                 else:
                     logger.error("Reply failed; check WeChat window")
+            else:
+                success = True
         except Exception:
             logger.error("Unhandled error in callback worker")
+        finally:
+            self._finish_inflight(talker, standardized["message_id"], standardized, success)
 
     # ── Voice recognition helpers ────────────────────────────────────
 
