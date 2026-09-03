@@ -30,12 +30,15 @@ def resolve_wcdb_dll(project_root: Path) -> Path:
     source_path = Path(project_root) / "native" / "windows" / "wcdb_api.dll"
     candidates = [source_path]
     if getattr(sys, "frozen", False):
-        candidates = [
-            Path(sys._MEIPASS) / "native" / "windows" / "wcdb_api.dll",
+        candidates = []
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "native" / "windows" / "wcdb_api.dll")
+        candidates.extend([
             Path(sys.executable).resolve().parent / "native" / "windows" / "wcdb_api.dll",
             source_path,
-        ]
-    return next((candidate for candidate in candidates if candidate.exists()), candidates[-1])
+        ])
+    return next((candidate for candidate in candidates if candidate.is_file()), candidates[-1])
 
 
 def run_preflight(
@@ -44,10 +47,19 @@ def run_preflight(
     allowed_hashes: Iterable[str] = (),
 ) -> PreflightReport:
     errors: list[str] = []
-    raw_groups = getattr(config, "class_assistant_groups", ()) or ()
+    raw_groups = getattr(config, "class_assistant_groups", None)
     if isinstance(raw_groups, str):
         raw_groups = raw_groups.split(",")
-    groups = tuple(str(group).strip() for group in raw_groups)
+    groups: tuple[str, ...] = ()
+    if raw_groups is None:
+        errors.append("CLASS_ASSISTANT_GROUPS must contain explicit stable chat_id values")
+    else:
+        try:
+            if not all(isinstance(group, str) for group in raw_groups):
+                raise TypeError("group values must be strings")
+            groups = tuple(group.strip() for group in raw_groups)
+        except TypeError:
+            errors.append("CLASS_ASSISTANT_GROUPS must be an iterable of strings")
     if not groups or any(not group or group == "*" for group in groups):
         errors.append(
             "CLASS_ASSISTANT_GROUPS must contain explicit stable chat_id values"
@@ -65,11 +77,20 @@ def run_preflight(
         return PreflightReport(False, str(dll), "", tuple(errors))
 
     digest = _sha256(dll)
-    allowed = {
-        str(value).strip().lower()
-        for value in allowed_hashes
-        if str(value).strip()
-    }
+    allowed = set()
+    invalid_hash = False
+    try:
+        for value in allowed_hashes:
+            if not isinstance(value, str):
+                invalid_hash = True
+                continue
+            normalized = value.strip().lower()
+            if normalized:
+                allowed.add(normalized)
+    except TypeError:
+        invalid_hash = True
+    if invalid_hash:
+        errors.append("WCDB_ALLOWED_SHA256 must contain only string hashes")
     if not allowed:
         errors.append("WCDB_ALLOWED_SHA256 must contain at least one reviewed hash")
     elif digest.lower() not in allowed:

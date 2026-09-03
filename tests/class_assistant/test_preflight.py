@@ -116,6 +116,67 @@ def test_frozen_dll_resolution_matches_loader_priority(tmp_path, monkeypatch):
     assert resolve_wcdb_dll(source_root) == meipass_dll
 
 
+def test_frozen_resolution_without_meipass_does_not_raise(tmp_path, monkeypatch):
+    source_root = tmp_path / "source"
+    dll = source_root / "native" / "windows" / "wcdb_api.dll"
+    dll.parent.mkdir(parents=True)
+    dll.write_bytes(b"source")
+    monkeypatch.setattr("src.class_assistant.preflight.sys.frozen", True, raising=False)
+    monkeypatch.delattr("src.class_assistant.preflight.sys._MEIPASS", raising=False)
+    monkeypatch.setattr("src.class_assistant.preflight.sys.executable", str(tmp_path / "bot.exe"))
+    assert resolve_wcdb_dll(source_root) == dll
+
+
+@pytest.mark.parametrize("raw_groups", [None, 123, [None], [123]])
+def test_non_string_groups_are_rejected(tmp_path, raw_groups):
+    digest = put_dll(tmp_path)
+    report = run_preflight(config(class_assistant_groups=raw_groups), tmp_path, [digest])
+    assert report.ok is False
+    assert any("group" in error.lower() for error in report.errors)
+
+
+def test_non_string_hash_allowlist_is_rejected_without_crashing(tmp_path):
+    put_dll(tmp_path)
+    report = run_preflight(config(), tmp_path, [None, 123])
+    assert report.ok is False
+    assert any("sha256" in error.lower() for error in report.errors)
+
+
+def test_directory_named_dll_is_not_read(tmp_path):
+    dll = tmp_path / "native" / "windows" / "wcdb_api.dll"
+    dll.mkdir(parents=True)
+    report = run_preflight(config(), tmp_path, ["a" * 64])
+    assert report.ok is False
+    assert report.dll_sha256 == ""
+
+
+def test_preflight_uses_loader_source_root_when_app_home_differs(monkeypatch, tmp_path):
+    try:
+        from src.bot import Bot
+    except ModuleNotFoundError as exc:
+        if exc.name != "anthropic":
+            raise
+        fake_anthropic = types.ModuleType("anthropic")
+        fake_anthropic.RateLimitError = type("RateLimitError", (Exception,), {})
+        fake_anthropic.APIConnectionError = type("APIConnectionError", (Exception,), {})
+        fake_anthropic.InternalServerError = type("InternalServerError", (Exception,), {})
+        fake_anthropic.Anthropic = object
+        monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
+        from src.bot import Bot
+    bot = Bot.__new__(Bot)
+    bot._config = config()
+    seen = {}
+    monkeypatch.setenv("WEBOT_APP_HOME", str(tmp_path / "app-home"))
+    monkeypatch.setattr("src.bot.PROJECT_ROOT", tmp_path / "patched-project-root")
+    monkeypatch.setattr(
+        "src.class_assistant.preflight.run_preflight",
+        lambda config, root, allowed_hashes: seen.update(root=root) or PreflightReport(False, errors=("blocked",)),
+    )
+    with pytest.raises(RuntimeError):
+        bot._create_checked_wechat_backend(None)
+    assert seen["root"] == Path(__file__).resolve().parents[2]
+
+
 def test_preflight_does_not_load_dll(tmp_path, monkeypatch):
     digest = put_dll(tmp_path)
     def fail_load(*args, **kwargs):

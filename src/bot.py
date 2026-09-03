@@ -370,7 +370,8 @@ class Bot:
                 for value in os.getenv("WCDB_ALLOWED_SHA256", "").split(",")
                 if value.strip()
             )
-            report = run_preflight(config, PROJECT_ROOT, allowed_hashes)
+            loader_source_root = Path(__file__).resolve().parent.parent
+            report = run_preflight(config, loader_source_root, allowed_hashes)
             if not report.ok:
                 raise RuntimeError(
                     "Class-assistant preflight failed: " + "; ".join(report.errors)

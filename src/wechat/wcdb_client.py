@@ -195,11 +195,17 @@ def _find_dll():
         Path(__file__).resolve().parent.parent.parent / "native" / "windows" / "wcdb_api.dll",
     ]
     if getattr(sys, "frozen", False):
-        candidates.insert(0, Path(sys.executable).resolve().parent / "native" / "windows" / "wcdb_api.dll")
-        candidates.insert(0, Path(sys._MEIPASS) / "native" / "windows" / "wcdb_api.dll")
+        candidates = []
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "native" / "windows" / "wcdb_api.dll")
+        candidates.extend([
+            Path(sys.executable).resolve().parent / "native" / "windows" / "wcdb_api.dll",
+            Path(__file__).resolve().parent.parent.parent / "native" / "windows" / "wcdb_api.dll",
+        ])
 
     for c in candidates:
-        if c.exists():
+        if c.is_file():
             logger.info("Found wcdb_api.dll at: %s", c)
             return str(c.parent), str(c)
 
