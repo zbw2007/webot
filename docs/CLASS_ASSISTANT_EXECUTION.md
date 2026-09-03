@@ -5,10 +5,11 @@
 - 执行日期：2026-09-03（Asia/Shanghai）
 - 工作目录：`C:\Users\27032\WeBot-ClassAssistant`
 - 上游：`https://github.com/GuMu599/webot.git`
-- 基线 commit：`19b82a2f941eeebcaed37e386c34c96bba69a23d`
+- 基线 commit：`7686c800b8b059f175f7cc44e6608762d31228ca`
 - 当前分支：`feature/class-assistant`
-- 当前 HEAD：`eb05be4`
-- GitHub Fork：未绑定。当前环境没有 GitHub CLI，且没有可用的已认证 Fork 远程；未伪造 `origin`，代码仍与上游隔离。
+- 当前 HEAD：`7686c800b8b059f175f7cc44e6608762d31228ca`
+- GitHub Fork：`https://github.com/zbw2007/webot.git`
+- Fork 推送日期：2026-09-03（Asia/Shanghai）
 - 初始 Git 状态：下载后工作树干净；CowAgent 目录未触碰。
 
 ## 环境
