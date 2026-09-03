@@ -1,6 +1,7 @@
 import threading
 import time
 import importlib
+import pytest
 
 from src.wechat.wcdb_backend import WcdbBackend
 
@@ -81,6 +82,25 @@ class SessionClient:
 
     def close(self):
         self.close_calls += 1
+
+
+class FailingLifecycleClient(SessionClient):
+    def __init__(self, failure):
+        super().__init__([])
+        self.failure = failure
+
+    def init(self):
+        if self.failure == "init":
+            raise RuntimeError("init failed")
+
+    def open(self):
+        if self.failure == "open":
+            raise RuntimeError("open failed")
+
+    def get_sessions(self):
+        if self.failure == "resolve":
+            raise RuntimeError("resolve failed")
+        return super().get_sessions()
 
 
 class ExplodingGroupName(str):
@@ -167,6 +187,35 @@ def test_stop_closes_and_clears_client():
     assert backend._running is False
     assert client.close_calls == 1
     assert backend._client is None
+
+
+def test_stop_clears_talker_mapping_and_blocks_stale_send():
+    client = SessionClient([])
+    backend = WcdbBackend(groups=["group@chatroom"])
+    backend._client = client
+    backend._talker_ids = {"group@chatroom": "old@chatroom"}
+    backend._running = True
+
+    backend.stop()
+
+    assert backend._client is None
+    assert backend._talker_ids == {}
+    assert backend.send_text("old@chatroom", "should not send") is False
+
+
+@pytest.mark.parametrize("failure", ["init", "open", "resolve"])
+def test_reinitialize_failure_clears_client_and_talker_mapping(monkeypatch, failure):
+    backend = WcdbBackend(groups=["missing@chatroom"])
+    backend._client = SessionClient([])
+    backend._talker_ids = {"old group": "old@chatroom"}
+    new_client = FailingLifecycleClient(failure)
+    monkeypatch.setattr(wcdb_backend, "WcdbNativeClient", lambda: new_client)
+
+    with pytest.raises(RuntimeError, match=f"{failure} failed"):
+        backend._reinitialize()
+
+    assert backend._client is None
+    assert backend._talker_ids == {}
 
 
 def test_standardize_serializes_nickname_resolution_with_reinitialize(monkeypatch):

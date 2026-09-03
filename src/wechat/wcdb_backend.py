@@ -188,6 +188,9 @@ class WcdbBackend(AbstractWeChatBackend):
         """Close the WCDB client; caller must hold ``_client_lock``."""
         client = self._client
         self._client = None
+        # Talker IDs belong to the client/session snapshot.  Never leave
+        # mappings from a closed client usable by send or polling paths.
+        self._talker_ids.clear()
         if client is not None:
             try:
                 client.close()
@@ -258,6 +261,10 @@ class WcdbBackend(AbstractWeChatBackend):
                 self._resolve_groups()
             except Exception as e:
                 logger.error("WCDB reinitialization failed: %s", e)
+                # A partially initialized replacement client is unsafe to
+                # retain, and its mappings must never fall back to the old
+                # client snapshot.
+                self._close_client_locked()
                 raise
         # Re-find WeChat window
         hwnd = self._window.find_hwnd()
