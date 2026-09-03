@@ -508,7 +508,7 @@ def test_message_store_poll_cursor_is_monotonic_and_persistent(tmp_path):
     store = MessageStore(conn)
     assert store.get_poll_cursor("class@chatroom") is None
     assert store.save_poll_cursor("class@chatroom", 10, "z") is True
-    assert store.save_poll_cursor("class@chatroom", 9, "later") is False
+    assert store.save_poll_cursor("class@chatroom", 9, "later") is True
     assert store.get_poll_cursor("class@chatroom") == (10, "z")
     conn.close()
     conn2 = initialize_db(str(tmp_path / "messages.db"))
@@ -572,3 +572,49 @@ def test_cursor_persistence_failure_keeps_delivery_pending_without_callback_dupl
     assert attempts == ["retry-persist"]
     assert backend._poll_cursors["class@chatroom"][0] == 1
     assert not backend._inflight
+
+
+def test_cursor_save_false_reconciles_durable_cursor_from_another_instance():
+    class ConcurrentStore:
+        def __init__(self):
+            self.cursor = None
+            self.save_calls = 0
+            self.get_calls = 0
+
+        def save_poll_cursor(self, chat_id, timestamp, message_id):
+            self.save_calls += 1
+            self.cursor = (3, "already-committed")
+            return False
+
+        def get_poll_cursor(self, chat_id):
+            self.get_calls += 1
+            return self.cursor
+
+        def get_sender_display_name(self, sender):
+            return None
+
+    store = ConcurrentStore()
+    backend = WcdbBackend(groups=["class@chatroom"], store=store)
+    backend._discover_position("class@chatroom", {
+        "timestamp": 2, "message_id": "target", "content": "target",
+    })
+    backend._reserve_inflight("class@chatroom", "target")
+    backend._finish_inflight("class@chatroom", "target", {
+        "timestamp": 2, "message_id": "target", "content": "target",
+    }, True)
+
+    assert store.get_calls == 2
+    assert backend._poll_cursors["class@chatroom"] == (3, "already-committed")
+    assert not backend._inflight
+
+
+def test_message_store_equal_cursor_is_idempotent_success(tmp_path):
+    from src.db import MessageStore, initialize_db
+
+    conn = initialize_db(str(tmp_path / "messages.db"))
+    store = MessageStore(conn)
+    assert store.save_poll_cursor("class@chatroom", 10, "same") is True
+    assert store.save_poll_cursor("class@chatroom", 10, "same") is True
+    assert store.save_poll_cursor("class@chatroom", 11, "newer") is True
+    assert store.save_poll_cursor("class@chatroom", 10, "older") is True
+    assert store.get_poll_cursor("class@chatroom") == (11, "newer")

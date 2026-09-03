@@ -147,26 +147,27 @@ class MessageStore:
 
     def save_poll_cursor(self, chat_id: str, timestamp: int, message_id: str,
                          backend: str = "wcdb") -> bool:
-        """Advance a cursor only when its compound position is newer."""
+        """Atomically advance a cursor, treating equal/newer durable state as success."""
         position = (int(timestamp), str(message_id))
         with self._lock:
-            current = self.conn.execute(
-                "SELECT timestamp, message_id FROM backend_poll_cursors "
-                "WHERE backend = ? AND chat_id = ?",
-                (str(backend), str(chat_id)),
-            ).fetchone()
-            if current and position <= (int(current["timestamp"]), str(current["message_id"])):
-                return False
             with self.conn:
                 self.conn.execute(
                     "INSERT INTO backend_poll_cursors "
                     "(backend, chat_id, timestamp, message_id) VALUES (?, ?, ?, ?) "
                     "ON CONFLICT(backend, chat_id) DO UPDATE SET "
                     "timestamp=excluded.timestamp, message_id=excluded.message_id, "
-                    "updated_at=strftime('%s','now')",
+                    "updated_at=strftime('%s','now') "
+                    "WHERE backend_poll_cursors.timestamp < excluded.timestamp "
+                    "OR (backend_poll_cursors.timestamp = excluded.timestamp "
+                    "AND backend_poll_cursors.message_id < excluded.message_id)",
                     (str(backend), str(chat_id), position[0], position[1]),
                 )
-            return True
+            final = self.conn.execute(
+                "SELECT timestamp, message_id FROM backend_poll_cursors "
+                "WHERE backend = ? AND chat_id = ?",
+                (str(backend), str(chat_id)),
+            ).fetchone()
+            return bool(final and (int(final["timestamp"]), str(final["message_id"])) >= position)
 
     def get_user_last_timestamp(self, chat_id: str,
                                 sender_id: str) -> Optional[int]:

@@ -120,7 +120,21 @@ class WcdbBackend(AbstractWeChatBackend):
             try:
                 result = saver(talker, cursor[0], cursor[1])
                 if result is False:
-                    return False
+                    # A concurrent instance may have committed the same or a
+                    # newer position while this call reported "not changed".
+                    # Bypass the in-memory cache and reconcile from durable
+                    # storage so completed messages do not remain inflight.
+                    getter = getattr(self._store, "get_poll_cursor", None)
+                    if not callable(getter):
+                        return False
+                    value = getter(talker)
+                    if value is None:
+                        return False
+                    durable = (int(value[0]), str(value[1]))
+                    if durable < cursor:
+                        return False
+                    self._poll_cursors[talker] = durable
+                    return True
             except Exception:
                 logger.warning("Failed to persist polling cursor")
                 return False
