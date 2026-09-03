@@ -77,6 +77,11 @@ class WcdbBackend(AbstractWeChatBackend):
         self._poll_cursors: dict[str, tuple[int, str]] = {}
         self._state_lock = threading.Lock()
         self._inflight: set[tuple[str, str]] = set()
+        # Per-talker delivery ledger.  A cursor may advance only through
+        # positions that were observed and completed without a gap.
+        self._discovered_positions: dict[str, dict[tuple[int, str], str]] = {}
+        self._completed_positions: dict[str, set[tuple[int, str]]] = {}
+        self._pending_success: dict[str, dict[tuple[int, str], dict]] = {}
         # Thread safety: WCDB DLL (ctypes) may not be thread-safe internally.
         # All _client calls are serialized through this lock.
         self._client_lock = threading.Lock()
@@ -122,32 +127,76 @@ class WcdbBackend(AbstractWeChatBackend):
         self._poll_cursors[talker] = cursor
         return True
 
-    def _reserve_inflight(self, talker: str, message_id: str) -> bool:
+    def _discover_position(self, talker: str, standardized: dict) -> tuple[int, str]:
+        position = (int(standardized["timestamp"]), str(standardized["message_id"]))
+        with self._state_lock:
+            self._discovered_positions.setdefault(talker, {})[position] = str(
+                standardized["message_id"]
+            )
+        return position
+
+    def _reserve_inflight(self, talker: str, message_id: str,
+                          standardized: Optional[dict] = None) -> bool:
         key = (talker, message_id)
         with self._state_lock:
             if message_id in self._known_ids or key in self._inflight:
                 return False
+            if standardized is not None:
+                position = (int(standardized["timestamp"]), str(message_id))
+                self._discovered_positions.setdefault(talker, {})[position] = str(message_id)
             self._inflight.add(key)
             return True
+
+    def _commit_contiguous_locked(self, talker: str) -> None:
+        """Persist the furthest completed contiguous position, if any.
+
+        Caller holds ``_state_lock``.  Keeping inflight reservations until
+        persistence succeeds closes the duplicate-dispatch window.
+        """
+        cursor = self._load_poll_cursor(talker)
+        discovered = self._discovered_positions.get(talker, {})
+        completed = self._completed_positions.get(talker, set())
+        pending = self._pending_success.get(talker, {})
+        contiguous = [position for position in sorted(discovered)
+                      if position > cursor and position in completed]
+        if not contiguous:
+            return
+        # A missing completed position is a delivery gap; do not jump over it.
+        expected = []
+        for position in sorted(discovered):
+            if position <= cursor:
+                continue
+            if position not in completed:
+                break
+            expected.append(position)
+        if not expected:
+            return
+        target = expected[-1]
+        if not self._save_poll_cursor(talker, target):
+            return
+        for position in expected:
+            message_id = discovered[position]
+            self._known_ids.add(message_id)
+            completed.discard(position)
+            pending.pop(position, None)
+            self._inflight.discard((talker, message_id))
+
+    def _retry_pending_success(self, talker: str) -> None:
+        with self._state_lock:
+            self._commit_contiguous_locked(talker)
 
     def _finish_inflight(self, talker: str, message_id: str,
                          standardized: dict, success: bool) -> None:
         key = (talker, message_id)
         with self._state_lock:
-            self._inflight.discard(key)
-        if not success:
-            return
-        position = (int(standardized["timestamp"]), str(message_id))
-        persisted = self._save_poll_cursor(talker, position)
-        # A durable store may report False for an older concurrent write.  If
-        # its cursor is already at/after this message, delivery is complete;
-        # only an actual persistence error should leave it retryable.
-        if not persisted:
-            current = self._load_poll_cursor(talker)
-            persisted = current >= position
-        if persisted:
-            with self._state_lock:
-                self._known_ids.add(message_id)
+            if not success:
+                self._inflight.discard(key)
+                return
+            position = (int(standardized["timestamp"]), str(message_id))
+            self._discovered_positions.setdefault(talker, {})[position] = str(message_id)
+            self._completed_positions.setdefault(talker, set()).add(position)
+            self._pending_success.setdefault(talker, {})[position] = standardized
+            self._commit_contiguous_locked(talker)
 
     # ── Public API ─────────────────────────────────────────────────
 
@@ -566,6 +615,7 @@ class WcdbBackend(AbstractWeChatBackend):
         # or before the per-group cursor, older pages cannot contain new
         # messages.  The complete boundary page is still examined so messages
         # sharing a timestamp are not skipped.
+        self._retry_pending_success(talker)
         page_size = 50
         cursor = self._load_poll_cursor(talker)
         standardized_messages = []
@@ -589,6 +639,7 @@ class WcdbBackend(AbstractWeChatBackend):
                 for raw in page:
                     standardized = self._standardize(raw, group_name, talker)
                     if standardized is not None:
+                        self._discover_position(talker, standardized)
                         page_records.append(standardized)
                 standardized_messages.extend(page_records)
                 if cursor != (0, "") and any(
@@ -623,7 +674,7 @@ class WcdbBackend(AbstractWeChatBackend):
                 break
 
             msg_id = standardized["message_id"]
-            if not self._reserve_inflight(talker, msg_id):
+            if not self._reserve_inflight(talker, msg_id, standardized):
                 continue
 
             if self._bot_name and self._bot_name in standardized["sender_name"]:
@@ -648,6 +699,15 @@ class WcdbBackend(AbstractWeChatBackend):
     def _handle_message(self, group_name: str, talker: str,
                         standardized: dict, callback: MessageCallback) -> None:
         """Execute callback and send reply (runs in thread pool worker)."""
+        # Keep direct test/integration calls safe: normal polling reserves
+        # first, while direct callers get the same at-most-once reservation.
+        key = (talker, standardized["message_id"])
+        with self._state_lock:
+            reserved = key in self._inflight
+            known = standardized["message_id"] in self._known_ids
+        if not reserved and not known and not self._reserve_inflight(
+                talker, standardized["message_id"], standardized):
+            return
         if not self._running:
             self._finish_inflight(talker, standardized["message_id"], standardized, False)
             return

@@ -513,3 +513,62 @@ def test_message_store_poll_cursor_is_monotonic_and_persistent(tmp_path):
     conn.close()
     conn2 = initialize_db(str(tmp_path / "messages.db"))
     assert MessageStore(conn2).get_poll_cursor("class@chatroom") == (10, "z")
+
+
+def test_successful_messages_commit_only_through_contiguous_gap():
+    backend = WcdbBackend(groups=["class@chatroom"])
+    backend._running = True
+    first = {"timestamp": 1, "message_id": "first", "content": "first"}
+    second = {"timestamp": 2, "message_id": "second", "content": "second"}
+    backend._discover_position("class@chatroom", first)
+    backend._discover_position("class@chatroom", second)
+    assert backend._reserve_inflight("class@chatroom", first["message_id"])
+    assert backend._reserve_inflight("class@chatroom", second["message_id"])
+
+    backend._finish_inflight("class@chatroom", second["message_id"], second, True)
+    assert backend._poll_cursors == {}
+    assert ("class@chatroom", second["message_id"]) in backend._inflight
+
+    backend._finish_inflight("class@chatroom", first["message_id"], first, True)
+    assert backend._poll_cursors["class@chatroom"] == (2, second["message_id"])
+    assert not backend._inflight
+
+
+def test_cursor_persistence_failure_keeps_delivery_pending_without_callback_duplicate():
+    class FlakyStore:
+        def __init__(self):
+            self.calls = 0
+            self.cursor = None
+
+        def save_poll_cursor(self, chat_id, timestamp, message_id):
+            self.calls += 1
+            if self.calls == 1:
+                return False
+            self.cursor = (timestamp, message_id)
+            return True
+
+        def get_poll_cursor(self, chat_id):
+            return self.cursor
+
+        def get_sender_display_name(self, sender):
+            return None
+
+    client = PagingClient([{
+        "sender_username": "wxid_sender", "content": "retry-persist",
+        "timestamp": 1, "server_id": "retry-persist",
+    }])
+    store = FlakyStore()
+    backend = WcdbBackend(groups=["class@chatroom"], store=store)
+    backend._client = client
+    backend._running = True
+    attempts = []
+
+    backend._poll_group("class@chatroom", "class@chatroom", lambda message: attempts.append(message["content"]))
+    assert attempts == ["retry-persist"]
+    assert backend._poll_cursors == {}
+    assert backend._inflight
+
+    backend._poll_group("class@chatroom", "class@chatroom", lambda message: attempts.append(message["content"]))
+    assert attempts == ["retry-persist"]
+    assert backend._poll_cursors["class@chatroom"][0] == 1
+    assert not backend._inflight
