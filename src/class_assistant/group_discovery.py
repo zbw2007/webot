@@ -30,9 +30,12 @@ def discover_groups(client: Any) -> list[dict[str, Any]]:
                 member_count = len(members or [])
             except Exception:
                 # A stale/deleted group must not prevent discovery of all
-                # other groups.  Do not expose backend errors to the UI.
-                logger.warning("Could not read members for group metadata", exc_info=True)
+                # other groups.  Do not expose backend errors to logs or UI.
                 member_count = 0
+                logger.warning(
+                    "Group member metadata unavailable; using member_count=%d",
+                    member_count,
+                )
             result.append({
                 "chat_id": chat_id,
                 "display_name": display_name,
@@ -40,5 +43,7 @@ def discover_groups(client: Any) -> list[dict[str, Any]]:
             })
         return sorted(result, key=lambda item: (item["display_name"].casefold(), item["chat_id"]))
     except Exception:
-        logger.exception("Group metadata discovery failed")
+        # Keep logs useful for operations without retaining exception text,
+        # tracebacks, paths, or backend-specific data.
+        logger.error("Group metadata discovery unavailable")
         raise RuntimeError("group discovery unavailable") from None

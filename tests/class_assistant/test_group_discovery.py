@@ -31,7 +31,7 @@ def test_discover_groups_returns_sorted_metadata_only():
     assert not client.messages_called
 
 
-def test_discover_groups_converts_backend_errors_to_controlled_error():
+def test_discover_groups_converts_backend_errors_to_controlled_error(caplog):
     class Broken(FakeClient):
         def get_sessions(self):
             raise RuntimeError("backend unavailable")
@@ -40,9 +40,12 @@ def test_discover_groups_converts_backend_errors_to_controlled_error():
         discover_groups(Broken())
     assert "backend unavailable" not in str(error.value)
     assert "C:\\secret" not in str(error.value)
+    assert caplog.records
+    assert all(record.exc_info is None for record in caplog.records)
+    assert all("backend unavailable" not in record.getMessage() for record in caplog.records)
 
 
-def test_discover_groups_keeps_group_when_member_lookup_fails_and_deduplicates():
+def test_discover_groups_keeps_group_when_member_lookup_fails_and_deduplicates(caplog):
     class PartialClient(FakeClient):
         def get_sessions(self):
             return [
@@ -61,3 +64,6 @@ def test_discover_groups_keeps_group_when_member_lookup_fails_and_deduplicates()
         {"chat_id": "broken@chatroom", "display_name": "Broken", "member_count": 0},
         {"chat_id": "ok@chatroom", "display_name": "OK", "member_count": 1},
     ]
+    assert caplog.records
+    assert all(record.exc_info is None for record in caplog.records)
+    assert all("members unavailable" not in record.getMessage() for record in caplog.records)
