@@ -97,6 +97,10 @@ class WcdbBackend(AbstractWeChatBackend):
         self._lease_backend = "wcdb"
         self._lease_ttl_sec = 300
         self._leased_talkers: set[str] = set()
+        # Lease state is shared by polling and lifecycle operations.  Keep it
+        # independent from the native-client lock so lease release cannot race
+        # a poll that is about to renew ownership.
+        self._lease_lock = threading.RLock()
 
     def _load_poll_cursor(self, talker: str) -> tuple[int, str]:
         """Load an optional cursor from the injected store.
@@ -232,32 +236,35 @@ class WcdbBackend(AbstractWeChatBackend):
     # ── Public API ─────────────────────────────────────────────────
 
     def _acquire_poll_lease(self, talker: str) -> bool:
-        acquire = getattr(self._store, "acquire_poll_lease", None)
-        if not callable(acquire):
-            return True
-        try:
-            expires_at = int(time.time()) + self._lease_ttl_sec
-            owned = bool(acquire(self._lease_backend, talker,
-                                 self._lease_owner, expires_at))
-        except Exception:
-            owned = False
-        if owned:
-            self._leased_talkers.add(talker)
-        else:
-            self._leased_talkers.discard(talker)
-        return owned
+        with self._lease_lock:
+            acquire = getattr(self._store, "acquire_poll_lease", None)
+            if not callable(acquire):
+                return True
+            try:
+                expires_at = int(time.time()) + max(300, self._lease_ttl_sec)
+                owned = bool(acquire(self._lease_backend, talker,
+                                     self._lease_owner, expires_at))
+            except Exception:
+                owned = False
+            if owned:
+                self._leased_talkers.add(talker)
+            else:
+                self._leased_talkers.discard(talker)
+            return owned
 
     def _release_poll_leases(self) -> None:
-        release = getattr(self._store, "release_poll_lease", None)
-        if not callable(release):
+        with self._lease_lock:
+            release = getattr(self._store, "release_poll_lease", None)
+            if not callable(release):
+                self._leased_talkers.clear()
+                return
+            for talker in list(self._leased_talkers):
+                try:
+                    release(self._lease_backend, talker, self._lease_owner)
+                except Exception:
+                    # Never expose target, owner, or store exception details.
+                    logger.warning("Failed to release polling lease")
             self._leased_talkers.clear()
-            return
-        for talker in list(self._leased_talkers):
-            try:
-                release(self._lease_backend, talker, self._lease_owner)
-            except Exception:
-                pass
-        self._leased_talkers.clear()
 
     def start(self, callback: MessageCallback) -> None:
         if not self._groups:
@@ -404,16 +411,25 @@ class WcdbBackend(AbstractWeChatBackend):
             return False
 
     def stop(self) -> None:
-        self._running = False
-        if self._pool:
-            self._pool.shutdown(wait=False)
-        with self._client_lock:
-            self._close_client_locked()
-        self._release_poll_leases()
+        with self._lease_lock:
+            self._running = False
+            pool = self._pool
+            self._pool = None
+            if pool:
+                pool.shutdown(wait=False)
+            with self._client_lock:
+                self._close_client_locked()
+            self._release_poll_leases()
 
     # ── Recovery ─────────────────────────────────────────────────────
 
     def _reinitialize(self) -> None:
+        # Keep release, client replacement, and reacquisition atomic with
+        # respect to polling lease operations.
+        with self._lease_lock:
+            self._reinitialize_locked()
+
+    def _reinitialize_locked(self) -> None:
         """Close and re-open the WCDB client after persistent errors.
 
         Called when the poll loop hits MAX_CONSECUTIVE_ERRORS consecutive
@@ -663,8 +679,6 @@ class WcdbBackend(AbstractWeChatBackend):
             talker = self._talker_ids.get(group_name)
             if not talker:
                 continue
-            if not self._acquire_poll_lease(talker):
-                continue
             self._poll_group(group_name, talker, callback)
         # Check shutdown signal before sleeping so stop() is responsive
         if not self._running:
@@ -673,16 +687,22 @@ class WcdbBackend(AbstractWeChatBackend):
 
     def _poll_group(self, group_name: str, talker: str,
                     callback: MessageCallback) -> None:
+        # Hold the lease lifecycle lock for the complete read/dispatch cycle:
+        # stop/reinitialize cannot release ownership while native reads are in
+        # flight, and a stopped backend cannot renew after release.
+        with self._lease_lock:
+            self._poll_group_locked(group_name, talker, callback)
+
+    def _poll_group_locked(self, group_name: str, talker: str,
+                           callback: MessageCallback) -> None:
         """Fetch messages for one group and dispatch new ones.
 
         AI-triggering callbacks are submitted to the thread pool so slow
         summarization in one group never blocks polling of other groups.
         """
         # A lease-capable store is fail-closed: never read without ownership.
-        if callable(getattr(self._store, "acquire_poll_lease", None)) \
-                and talker not in self._leased_talkers:
-            if not self._acquire_poll_lease(talker):
-                return
+        if not self._acquire_poll_lease(talker):
+            return
         # WCDB returns newest-first pages.  Once a page contains a message at
         # or before the per-group cursor, older pages cannot contain new
         # messages.  The complete boundary page is still examined so messages

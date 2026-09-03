@@ -1,6 +1,7 @@
 import threading
 import time
 import importlib
+import concurrent.futures
 import pytest
 from types import SimpleNamespace
 
@@ -654,6 +655,64 @@ def test_poll_lease_is_shared_between_store_instances(tmp_path):
     assert not second.acquire_poll_lease("wcdb", "g", "two", 4_000_000_000)
     assert first.release_poll_lease("wcdb", "g", "one")
     assert second.acquire_poll_lease("wcdb", "g", "two", 4_000_000_000)
+
+
+class RecordingLeaseStore:
+    def __init__(self):
+        self.calls = []
+
+    def acquire_poll_lease(self, backend, chat_id, owner, expires_at):
+        self.calls.append((backend, chat_id, owner, expires_at))
+        return True
+
+    def release_poll_lease(self, backend, chat_id, owner):
+        return True
+
+
+class EmptyMessageClient:
+    def get_messages(self, **_kwargs):
+        return []
+
+    def close(self):
+        pass
+
+
+def test_poll_group_renews_lease_before_each_read_with_minimum_ttl(monkeypatch):
+    store = RecordingLeaseStore()
+    backend = WcdbBackend(groups=["class@chatroom"], store=store, poll_sec=0)
+    backend._client = EmptyMessageClient()
+    backend._talker_ids = {"class@chatroom": "class@chatroom"}
+    backend._running = True
+    times = iter((1000, 1010))
+    monkeypatch.setattr(wcdb_backend.time, "time", lambda: next(times))
+
+    backend._poll_group("class@chatroom", "class@chatroom", lambda _message: None)
+    backend._poll_group("class@chatroom", "class@chatroom", lambda _message: None)
+
+    assert len(store.calls) == 2
+    assert store.calls[1][3] > store.calls[0][3]
+    assert store.calls[0][3] - 1000 >= 300
+    assert store.calls[1][3] - 1010 >= 300
+
+
+def test_stop_clears_pool_and_leases_even_when_release_fails(caplog):
+    class FailingReleaseStore(RecordingLeaseStore):
+        def release_poll_lease(self, *_args):
+            raise RuntimeError("secret failure")
+
+    store = FailingReleaseStore()
+    backend = WcdbBackend(groups=["class@chatroom"], store=store)
+    backend._leased_talkers = {"class@chatroom"}
+    backend._pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+    with caplog.at_level("WARNING"):
+        backend.stop()
+
+    assert backend._pool is None
+    assert backend._leased_talkers == set()
+    assert "secret failure" not in caplog.text
+    assert "class@chatroom" not in caplog.text
+    assert "Failed to release polling lease" in caplog.text
 
 
 def test_commit_contiguous_cleans_ledger_at_durable_cursor():
