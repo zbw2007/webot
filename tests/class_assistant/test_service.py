@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from src.class_assistant.service import ClassAssistantService
+from src.class_assistant.send_guard import SendBlocked
 from src.class_assistant.storage import Storage
 
 
@@ -196,6 +197,11 @@ def test_failed_analysis_does_not_advance_analysis_cursor(tmp_path):
     service.handle(message("m1", timestamp=100))
     service.run_digest(now=datetime.fromisoformat("2026-09-02T20:01:00+08:00"), force=True)
     assert storage.get_analysis_cursor("class@chatroom") == (0, "")
+    assert storage.query("reply_drafts") == []
+    assert all(
+        row["status"] not in {"approved", "sending", "sent"}
+        for row in storage.query("reply_drafts")
+    )
     assert len(calls) == 1
 
 
@@ -295,6 +301,33 @@ def test_real_send_claim_is_atomic_and_reconcile_is_explicit(tmp_path):
     assert service.send_draft("draft-claim", version=1, confirmation_token=token)["sent"] is True
     with pytest.raises(ValueError):
         service.reconcile_draft("draft-claim", 1, "sent")
+
+
+def test_confirmation_token_is_one_time_and_reuse_cannot_call_sender(tmp_path):
+    storage = Storage(str(tmp_path / "assistant.db"))
+    config = Config()
+    config.class_assistant_dry_run = False
+    config.class_assistant_real_send_enabled = True
+    sender_calls = []
+    service = ClassAssistantService(
+        config,
+        storage=storage,
+        sender=lambda chat_id, text: sender_calls.append((chat_id, text)) or True,
+        window_validator=lambda _chat, _group: True,
+    )
+    storage.insert_reply_draft({
+        "id": "draft-token", "version": 1, "chat_id": "class@chatroom",
+        "group_name": "Class", "text": "收到", "status": "approved",
+        "approved_version": 1, "risk_level": "low",
+    })
+    token = service.issue_confirmation_token()
+
+    assert service.send_draft(
+        "draft-token", version=1, confirmation_token=token
+    )["sent"] is True
+    with pytest.raises(SendBlocked):
+        service.send_draft("draft-token", version=1, confirmation_token=token)
+    assert len(sender_calls) == 1
 
 
 def test_real_send_two_threads_only_one_claims_and_sender_runs_once(tmp_path):

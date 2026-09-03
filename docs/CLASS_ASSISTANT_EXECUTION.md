@@ -7,7 +7,7 @@
 - 上游：`https://github.com/GuMu599/webot.git`
 - 基线 commit：`19b82a2f941eeebcaed37e386c34c96bba69a23d`
 - 当前分支：`feature/class-assistant`
-- 当前 HEAD：`07a9dcbba1bf70a80191ec41499c4e07e3c61e43`
+- 当前 HEAD：以提交后的 `git rev-parse HEAD` 结果为准（本记录随 Checkpoint 5 提交更新）
 - GitHub Fork：`https://github.com/zbw2007/webot.git`
 - Fork 推送日期：2026-09-03（Asia/Shanghai）
 - 初始 Git 状态：下载后工作树干净；CowAgent 目录未触碰。
@@ -34,7 +34,7 @@ pip check -> No broken requirements found.
 
 上游全量测试仍有与本功能无关的既有失败：`MAX_RETRIES` 校验、Feishu secret 展示断言，以及浅克隆缺少 macOS 工具文件导致的测试失败。没有修改这些基线问题。
 
-阶段一至四提交：`4f60227`（Fork/基线记录）、`376c30d`（前端锁定）、`89b929e` 至 `07a9dcb`（WCDB preflight、只读群元数据发现、生命周期及日志脱敏加固）。前端使用 npm 官方源完成安装并生成 `ui/package-lock.json`；`npm audit --omit=dev` 报告 0 vulnerabilities，`npm run build` 已通过（仅有 Vite CommonJS 配置和 chunk 体积提示）。
+阶段一至四提交：`4f60227`（Fork/基线记录）、`376c30d`（前端锁定）、`89b929e` 至 `b4a806b`（WCDB preflight、只读群元数据发现、生命周期及日志脱敏加固）。Fork 已绑定到 `https://github.com/zbw2007/webot.git`；前端使用 npm 官方源完成安装并生成 `ui/package-lock.json`；`npm audit --omit=dev` 报告 0 vulnerabilities，`npm run build` 已通过（仅有 Vite CommonJS 配置和 chunk 体积提示）。
 
 ## 安全状态
 
@@ -59,6 +59,6 @@ pip check -> No broken requirements found.
 - 覆盖真实发送模式下的原子 claim 竞争：同一批准版本两个线程只有一个成功，sender 只调用一次。
 - 覆盖发送器异常后的 `sending` 保留、显式失败对账为 `needs_reconciliation`，以及后续调用不会自动重发。
 - DeepSeek/model 失败保持分析游标不变且不产生可发送草稿；非法 JSON 只重试一次。
-- 本次离线验收：`pytest tests/class_assistant -q` → `97 passed`；`python -m compileall -q src tests`、`pip check`、`git diff --check` 均通过；前端 `npm run build` 通过。
+- 本次离线验收：专项测试覆盖白名单采集、双群独立分析、来源关联、编辑撤销批准、一次性确认令牌（含复用拦截）、DRY_RUN 模拟发送、并发 claim、崩溃对账和模型失败回滚；最终数字以本次执行命令输出为准。`python -m compileall -q src tests`、`pip check`、`git diff --check` 和前端 `npm run build` 必须通过。
 - 当前保持 `CLASS_ASSISTANT_ENABLED=false`、`REAL_SEND_ENABLED=false`、`DRY_RUN=true`，未连接主微信、未读取真实群消息、未操作发送器。
 - 48 小时外部测试仍未完成；可信 WCDB DLL 来源、签名、批准哈希和微信版本兼容性仍未确认，因此不能启动真实采集或进入真实账号上线阶段。
