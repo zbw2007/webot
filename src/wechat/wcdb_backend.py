@@ -72,6 +72,9 @@ class WcdbBackend(AbstractWeChatBackend):
         self._window = WeChatWindowController()
         self._talker_ids: dict[str, str] = {}
         self._known_ids = DedupSet(max_size=MAX_DEDUP_SIZE)
+        # Last delivered (timestamp, message id) per group.  The in-memory
+        # DedupSet remains the authoritative guard for replayed pages.
+        self._poll_cursors: dict[str, tuple[int, str]] = {}
         # Thread safety: WCDB DLL (ctypes) may not be thread-safe internally.
         # All _client calls are serialized through this lock.
         self._client_lock = threading.Lock()
@@ -252,6 +255,7 @@ class WcdbBackend(AbstractWeChatBackend):
                 logger.info("WCDB reinitialized successfully")
                 # Clear dedup set — WCDB may return messages with new IDs
                 self._known_ids = DedupSet(max_size=MAX_DEDUP_SIZE)
+                self._poll_cursors.clear()
                 # Re-resolve groups (talker IDs may have changed)
                 self._resolve_groups()
             except Exception as e:
@@ -283,11 +287,22 @@ class WcdbBackend(AbstractWeChatBackend):
         self._talker_ids.clear()
         sessions = self._client.get_sessions()
 
-        # Build a map of all @chatroom entries: username -> {name, member_count}
+        class_mode = bool(getattr(self._voice_config, "class_assistant_enabled", False))
+        # In class-assistant mode the configured values are stable IDs, never
+        # display names or discovery tokens.  Filter before any member/name
+        # lookup so non-whitelisted groups are not even read.
+        whitelist = {
+            group.strip() for group in self._groups
+            if isinstance(group, str) and group.strip().endswith("@chatroom")
+        } if class_mode else set()
+
+        # Build a map of permitted @chatroom entries: username -> {name, member_count}
         all_chatrooms: dict[str, dict] = {}
         for s in sessions:
             username = str(s.get("username", "") or "")
             if not username.endswith("@chatroom"):
+                continue
+            if class_mode and username not in whitelist:
                 continue
 
             # Try session-level display name fields (rarely populated)
@@ -334,7 +349,7 @@ class WcdbBackend(AbstractWeChatBackend):
                 and (not self._groups[0].strip() or is_auto_discovery_token(self._groups[0])))
         )
 
-        if getattr(self._voice_config, "class_assistant_enabled", False) and auto_discover:
+        if class_mode and auto_discover:
             logger.error("Class assistant groups must be explicit; refusing auto-discovery")
             return
 
@@ -481,8 +496,24 @@ class WcdbBackend(AbstractWeChatBackend):
         AI-triggering callbacks are submitted to the thread pool so slow
         summarization in one group never blocks polling of other groups.
         """
-        with self._client_lock:
-            messages = self._client.get_messages(talker=talker, limit=50)
+        # WCDB returns newest-first pages.  Walk every page so a busy group
+        # cannot lose messages between polls, then reverse the combined list
+        # to dispatch them in chronological order.  DedupSet handles replay
+        # of already-seen pages on the next poll.
+        page_size = 50
+        offset = 0
+        messages = []
+        while True:
+            with self._client_lock:
+                page = self._client.get_messages(
+                    talker=talker, limit=page_size, offset=offset,
+                )
+            if not page:
+                break
+            messages.extend(page)
+            offset += len(page)
+            if len(page) < page_size:
+                break
         if not messages:
             return
 
@@ -498,6 +529,9 @@ class WcdbBackend(AbstractWeChatBackend):
             if msg_id in self._known_ids:
                 continue
             self._known_ids.add(msg_id)
+            self._poll_cursors[talker] = (
+                int(standardized["timestamp"]), msg_id,
+            )
 
             if self._bot_name and self._bot_name in standardized["sender_name"]:
                 continue

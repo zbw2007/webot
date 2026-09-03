@@ -2,6 +2,7 @@ import threading
 import time
 import importlib
 import pytest
+from types import SimpleNamespace
 
 from src.wechat.wcdb_backend import WcdbBackend
 
@@ -242,3 +243,80 @@ def test_standardize_serializes_nickname_resolution_with_reinitialize(monkeypatc
     assert not reinit.is_alive()
     assert not standardize.is_alive()
     assert old_client.invalid_calls_during_close == []
+
+
+class WhitelistClient(SessionClient):
+    def __init__(self):
+        super().__init__([
+            {"username": "allowed@chatroom", "displayName": "Allowed"},
+            {"username": "other@chatroom", "displayName": "Other"},
+        ])
+        self.member_calls = []
+        self.name_calls = []
+
+    def get_group_members(self, chat_id):
+        self.member_calls.append(chat_id)
+        return [{"username": "wxid_member"}]
+
+    def get_display_names(self, wxids):
+        self.name_calls.append(list(wxids))
+        return {wxid: "Member" for wxid in wxids}
+
+
+def test_class_assistant_resolves_and_persists_only_explicit_whitelist(monkeypatch, tmp_path):
+    client = WhitelistClient()
+    config = SimpleNamespace(class_assistant_enabled=True)
+    backend = WcdbBackend(groups=["allowed@chatroom"], config=config)
+    backend._client = client
+    saved_names = []
+    saved_members = []
+    monkeypatch.setattr(wcdb_backend.WcdbBackend, "_save_group_names",
+                        staticmethod(lambda data: saved_names.append(data)))
+    monkeypatch.setattr(wcdb_backend.WcdbBackend, "_save_group_members",
+                        staticmethod(lambda data: saved_members.append(data)))
+
+    backend._resolve_groups()
+
+    assert client.member_calls == ["allowed@chatroom", "allowed@chatroom"]
+    assert client.name_calls == [["wxid_member"]]
+    assert saved_names == [{"allowed@chatroom": {"name": "Allowed", "member_count": 1}}]
+    assert saved_members == [{"allowed@chatroom": {"wxid_member": "Member"}}]
+    assert backend._talker_ids == {
+        "allowed@chatroom": "allowed@chatroom",
+        "Allowed": "allowed@chatroom",
+    }
+
+
+class PagingClient:
+    def __init__(self, messages):
+        self.messages = messages
+        self.offsets = []
+
+    def get_messages(self, talker, limit=50, offset=0):
+        self.offsets.append((talker, limit, offset))
+        newest_first = list(reversed(self.messages))
+        return newest_first[offset:offset + limit]
+
+    def resolve_nickname(self, sender):
+        return sender
+
+
+def test_poll_group_reads_all_pages_and_deduplicates_on_next_poll():
+    messages = [
+        {"sender_username": "wxid_sender", "content": f"message {i}",
+         "timestamp": i, "server_id": str(i)}
+        for i in range(120)
+    ]
+    client = PagingClient(messages)
+    backend = WcdbBackend(groups=["class@chatroom"])
+    backend._client = client
+    backend._running = True
+    received = []
+
+    backend._poll_group("class@chatroom", "class@chatroom", received.append)
+    backend._poll_group("class@chatroom", "class@chatroom", received.append)
+
+    assert [offset for _, _, offset in client.offsets[:3]] == [0, 50, 100]
+    assert [offset for _, _, offset in client.offsets[3:6]] == [0, 50, 100]
+    assert len(received) == 120
+    assert len({message["message_id"] for message in received}) == 120
