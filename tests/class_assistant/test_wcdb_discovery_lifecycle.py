@@ -317,6 +317,94 @@ def test_poll_group_reads_all_pages_and_deduplicates_on_next_poll():
     backend._poll_group("class@chatroom", "class@chatroom", received.append)
 
     assert [offset for _, _, offset in client.offsets[:3]] == [0, 50, 100]
-    assert [offset for _, _, offset in client.offsets[3:6]] == [0, 50, 100]
+    assert [offset for _, _, offset in client.offsets[3:]] == [0]
     assert len(received) == 120
     assert len({message["message_id"] for message in received}) == 120
+
+
+def test_poll_group_second_round_stops_at_cursor_and_reads_new_message():
+    messages = [
+        {"sender_username": "wxid_sender", "content": f"message {i}",
+         "timestamp": i, "server_id": str(i)}
+        for i in range(120)
+    ]
+    client = PagingClient(messages)
+    backend = WcdbBackend(groups=["class@chatroom"])
+    backend._client = client
+    backend._running = True
+    received = []
+
+    backend._poll_group("class@chatroom", "class@chatroom", received.append)
+    messages.append({"sender_username": "wxid_sender", "content": "new",
+                     "timestamp": 120, "server_id": "120"})
+    client.offsets.clear()
+    backend._poll_group("class@chatroom", "class@chatroom", received.append)
+
+    assert [offset for _, _, offset in client.offsets] == [0]
+    assert [message["content"] for message in received].count("new") == 1
+    assert len(received) == 121
+
+
+def test_poll_group_restores_cursor_from_shared_store():
+    class CursorStore:
+        def __init__(self):
+            self.cursors = {}
+
+        def get_poll_cursor(self, chat_id):
+            return self.cursors.get(chat_id)
+
+        def save_poll_cursor(self, chat_id, timestamp, message_id):
+            self.cursors[chat_id] = (timestamp, message_id)
+
+        def get_sender_display_name(self, _sender):
+            return None
+
+    store = CursorStore()
+    first_client = PagingClient([
+        {"sender_username": "wxid_sender", "content": "old",
+         "timestamp": 1, "server_id": "old"},
+    ])
+    first = WcdbBackend(groups=["class@chatroom"], store=store)
+    first._client = first_client
+    first._running = True
+    first._poll_group("class@chatroom", "class@chatroom", lambda _: None)
+
+    second_client = PagingClient(first_client.messages)
+    second = WcdbBackend(groups=["class@chatroom"], store=store)
+    second._client = second_client
+    second._running = True
+    received = []
+    second._poll_group("class@chatroom", "class@chatroom", received.append)
+
+    assert received == []
+    assert second_client.offsets == [("class@chatroom", 50, 0)]
+
+
+def test_poll_group_keeps_same_timestamp_messages_after_compound_cursor():
+    import hashlib
+
+    messages = [
+        {"sender_username": "wxid_sender", "content": "first",
+         "timestamp": 10, "server_id": "a"},
+        {"sender_username": "wxid_sender", "content": "second",
+         "timestamp": 10, "server_id": "b"},
+    ]
+    client = PagingClient(messages)
+    backend = WcdbBackend(groups=["class@chatroom"])
+    backend._client = client
+    backend._running = True
+    received = []
+    backend._poll_group("class@chatroom", "class@chatroom", received.append)
+
+    cursor_id = backend._poll_cursors["class@chatroom"][1]
+    new_server_id = next(
+        candidate for candidate in (f"new-{i}" for i in range(1000))
+        if hashlib.md5(candidate.encode()).hexdigest() > cursor_id
+    )
+    messages.append({"sender_username": "wxid_sender", "content": "third",
+                     "timestamp": 10, "server_id": new_server_id})
+    before = len(received)
+    backend._poll_group("class@chatroom", "class@chatroom", received.append)
+
+    assert len(received) == before + 1
+    assert received[-1]["content"] == "third"

@@ -85,6 +85,37 @@ class WcdbBackend(AbstractWeChatBackend):
         self._voice: Optional[object] = None
         self._voice_config = config
 
+    def _load_poll_cursor(self, talker: str) -> tuple[int, str]:
+        """Load an optional cursor from the injected store.
+
+        The backend itself only guarantees in-process cursors.  A store may
+        opt into restart recovery by implementing this tiny interface.
+        """
+        if talker in self._poll_cursors:
+            return self._poll_cursors[talker]
+        getter = getattr(self._store, "get_poll_cursor", None)
+        if not callable(getter):
+            return (0, "")
+        try:
+            value = getter(talker)
+            if value is None:
+                return (0, "")
+            timestamp, message_id = value
+            cursor = (int(timestamp), str(message_id))
+            self._poll_cursors[talker] = cursor
+            return cursor
+        except (TypeError, ValueError, KeyError):
+            return (0, "")
+
+    def _save_poll_cursor(self, talker: str, cursor: tuple[int, str]) -> None:
+        self._poll_cursors[talker] = cursor
+        saver = getattr(self._store, "save_poll_cursor", None)
+        if callable(saver):
+            try:
+                saver(talker, cursor[0], cursor[1])
+            except Exception:
+                logger.warning("Failed to persist polling cursor")
+
     # ── Public API ─────────────────────────────────────────────────
 
     def start(self, callback: MessageCallback) -> None:
@@ -253,9 +284,11 @@ class WcdbBackend(AbstractWeChatBackend):
                 self._client.init()
                 self._client.open()
                 logger.info("WCDB reinitialized successfully")
-                # Clear dedup set — WCDB may return messages with new IDs
+                # Clear dedup set — WCDB may return messages with new IDs.
+                # Poll cursors remain per talker so reinitialization does not
+                # replay the entire history; persisted stores can also restore
+                # them when a new backend instance is created.
                 self._known_ids = DedupSet(max_size=MAX_DEDUP_SIZE)
-                self._poll_cursors.clear()
                 # Re-resolve groups (talker IDs may have changed)
                 self._resolve_groups()
             except Exception as e:
@@ -496,13 +529,14 @@ class WcdbBackend(AbstractWeChatBackend):
         AI-triggering callbacks are submitted to the thread pool so slow
         summarization in one group never blocks polling of other groups.
         """
-        # WCDB returns newest-first pages.  Walk every page so a busy group
-        # cannot lose messages between polls, then reverse the combined list
-        # to dispatch them in chronological order.  DedupSet handles replay
-        # of already-seen pages on the next poll.
+        # WCDB returns newest-first pages.  Once a page contains a message at
+        # or before the per-group cursor, older pages cannot contain new
+        # messages.  The complete boundary page is still examined so messages
+        # sharing a timestamp are not skipped.
         page_size = 50
         offset = 0
-        messages = []
+        cursor = self._load_poll_cursor(talker)
+        standardized_messages = []
         while True:
             with self._client_lock:
                 page = self._client.get_messages(
@@ -510,28 +544,45 @@ class WcdbBackend(AbstractWeChatBackend):
                 )
             if not page:
                 break
-            messages.extend(page)
             offset += len(page)
+            page_records = []
+            for raw in page:
+                standardized = self._standardize(raw, group_name, talker)
+                if standardized is not None:
+                    page_records.append(standardized)
+            standardized_messages.extend(page_records)
+            if cursor != (0, "") and any(
+                (int(item["timestamp"]), str(item["message_id"])) <= cursor
+                for item in page_records
+            ):
+                break
             if len(page) < page_size:
                 break
-        if not messages:
+        if not standardized_messages:
             return
 
-        for msg in reversed(messages):
+        candidates = []
+        for standardized in standardized_messages:
+            position = (int(standardized["timestamp"]),
+                        str(standardized["message_id"]))
+            if cursor != (0, "") and position <= cursor:
+                continue
+            candidates.append(standardized)
+
+        for standardized in sorted(
+            candidates, key=lambda item: (int(item["timestamp"]),
+                                          str(item["message_id"])),
+        ):
             if not self._running:
                 break
-
-            standardized = self._standardize(msg, group_name, talker)
-            if standardized is None:
-                continue
 
             msg_id = standardized["message_id"]
             if msg_id in self._known_ids:
                 continue
             self._known_ids.add(msg_id)
-            self._poll_cursors[talker] = (
+            self._save_poll_cursor(talker, (
                 int(standardized["timestamp"]), msg_id,
-            )
+            ))
 
             if self._bot_name and self._bot_name in standardized["sender_name"]:
                 continue
