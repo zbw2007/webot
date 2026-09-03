@@ -78,6 +78,18 @@ CREATE TABLE IF NOT EXISTS backend_poll_cursors (
     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     PRIMARY KEY (backend, chat_id)
 );
+
+-- Cross-process lease preventing multiple native backends from polling one chat.
+CREATE TABLE IF NOT EXISTS backend_poll_leases (
+    backend TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY (backend, chat_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_backend_poll_leases_expiry
+    ON backend_poll_leases(expires_at);
 """
 
 

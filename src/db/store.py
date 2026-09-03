@@ -169,6 +169,39 @@ class MessageStore:
             ).fetchone()
             return bool(final and (int(final["timestamp"]), str(final["message_id"])) >= position)
 
+    def acquire_poll_lease(self, backend: str, chat_id: str, owner: str,
+                           expires_at: int) -> bool:
+        """Atomically acquire or renew a backend/chat polling lease."""
+        now = int(time.time())
+        with self._lock:
+            with self.conn:
+                self.conn.execute(
+                    """INSERT INTO backend_poll_leases
+                       (backend, chat_id, owner, expires_at) VALUES (?, ?, ?, ?)
+                       ON CONFLICT(backend, chat_id) DO UPDATE SET
+                       owner=excluded.owner, expires_at=excluded.expires_at
+                       WHERE backend_poll_leases.expires_at <= ?
+                          OR backend_poll_leases.owner = excluded.owner""",
+                    (str(backend), str(chat_id), str(owner), int(expires_at), now),
+                )
+            row = self.conn.execute(
+                "SELECT owner, expires_at FROM backend_poll_leases "
+                "WHERE backend=? AND chat_id=?",
+                (str(backend), str(chat_id)),
+            ).fetchone()
+            return bool(row and row["owner"] == str(owner)
+                        and int(row["expires_at"]) > now)
+
+    def release_poll_lease(self, backend: str, chat_id: str, owner: str) -> bool:
+        """Release only the lease owned by this backend instance."""
+        with self._lock:
+            with self.conn:
+                cur = self.conn.execute(
+                    "DELETE FROM backend_poll_leases WHERE backend=? AND chat_id=? AND owner=?",
+                    (str(backend), str(chat_id), str(owner)),
+                )
+            return cur.rowcount > 0
+
     def get_user_last_timestamp(self, chat_id: str,
                                 sender_id: str) -> Optional[int]:
         """Get the Unix timestamp of a user's most recent message in a chat."""

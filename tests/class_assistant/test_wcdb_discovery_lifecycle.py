@@ -5,6 +5,7 @@ import pytest
 from types import SimpleNamespace
 
 from src.wechat.wcdb_backend import WcdbBackend
+from src.wechat.helpers import DedupSet
 
 wcdb_backend = importlib.import_module("src.wechat.wcdb_backend")
 
@@ -618,3 +619,55 @@ def test_message_store_equal_cursor_is_idempotent_success(tmp_path):
     assert store.save_poll_cursor("class@chatroom", 11, "newer") is True
     assert store.save_poll_cursor("class@chatroom", 10, "older") is True
     assert store.get_poll_cursor("class@chatroom") == (11, "newer")
+
+
+def test_poll_lease_competes_renews_expires_and_releases(tmp_path):
+    from src.db.schema import initialize_db
+    from src.db.store import MessageStore
+
+    conn = initialize_db(str(tmp_path / "leases.db"))
+    first = MessageStore(conn)
+    now = int(time.time())
+    assert first.acquire_poll_lease("wcdb", "class@chatroom", "one", now + 300)
+    assert not first.acquire_poll_lease("wcdb", "class@chatroom", "two", now + 300)
+    assert first.acquire_poll_lease("wcdb", "class@chatroom", "one", now + 300)
+    conn.execute(
+        "UPDATE backend_poll_leases SET expires_at=0 "
+        "WHERE backend='wcdb' AND chat_id='class@chatroom'"
+    )
+    conn.commit()
+    assert first.acquire_poll_lease("wcdb", "class@chatroom", "two", now + 300)
+    assert first.release_poll_lease("wcdb", "class@chatroom", "two")
+    assert not first.release_poll_lease("wcdb", "class@chatroom", "one")
+
+
+def test_poll_lease_is_shared_between_store_instances(tmp_path):
+    from src.db.schema import initialize_db
+    from src.db.store import MessageStore
+
+    path = str(tmp_path / "leases.db")
+    first_conn = initialize_db(path)
+    second_conn = initialize_db(path)
+    first = MessageStore(first_conn)
+    second = MessageStore(second_conn)
+    assert first.acquire_poll_lease("wcdb", "g", "one", 4_000_000_000)
+    assert not second.acquire_poll_lease("wcdb", "g", "two", 4_000_000_000)
+    assert first.release_poll_lease("wcdb", "g", "one")
+    assert second.acquire_poll_lease("wcdb", "g", "two", 4_000_000_000)
+
+
+def test_commit_contiguous_cleans_ledger_at_durable_cursor():
+    backend = object.__new__(WcdbBackend)
+    backend._poll_cursors = {"g": (0, "")}
+    backend._discovered_positions = {"g": {(1, "a"): "a", (2, "b"): "b"}}
+    backend._completed_positions = {"g": {(1, "a"), (2, "b")}}
+    backend._pending_success = {"g": {(1, "a"): {}, (2, "b"): {}}}
+    backend._inflight = {("g", "a"), ("g", "b")}
+    backend._known_ids = DedupSet(max_size=100)
+    backend._state_lock = threading.Lock()
+    backend._store = None
+    with backend._state_lock:
+        backend._commit_contiguous_locked("g")
+    assert backend._discovered_positions["g"] == {}
+    assert backend._completed_positions["g"] == set()
+    assert backend._pending_success["g"] == {}
