@@ -252,20 +252,7 @@ class Bot:
             self._update_status = lambda **kw: None
 
         # ── 5. WeChat backend ───────────────────────────────────
-        if getattr(config, "class_assistant_enabled", False):
-            from .class_assistant.preflight import run_preflight
-
-            allowed_hashes = tuple(
-                value.strip()
-                for value in os.getenv("WCDB_ALLOWED_SHA256", "").split(",")
-                if value.strip()
-            )
-            report = run_preflight(config, PROJECT_ROOT, allowed_hashes)
-            if not report.ok:
-                raise RuntimeError(
-                    "Class-assistant preflight failed: " + "; ".join(report.errors)
-                )
-        backend = self._create_wechat_backend(store)
+        backend = self._create_checked_wechat_backend(store)
         self._backend = backend
         self.backend = backend   # public ref for lifecycle control
 
@@ -371,6 +358,24 @@ class Bot:
             logger.info("Bot shut down gracefully.")
 
     # ── Helpers ──────────────────────────────────────────────────
+
+    def _create_checked_wechat_backend(self, store=None):
+        """Run class-assistant safety checks before constructing WeChat."""
+        config = self._config
+        if getattr(config, "class_assistant_enabled", False):
+            from .class_assistant.preflight import run_preflight
+
+            allowed_hashes = tuple(
+                value.strip()
+                for value in os.getenv("WCDB_ALLOWED_SHA256", "").split(",")
+                if value.strip()
+            )
+            report = run_preflight(config, PROJECT_ROOT, allowed_hashes)
+            if not report.ok:
+                raise RuntimeError(
+                    "Class-assistant preflight failed: " + "; ".join(report.errors)
+                )
+        return self._create_wechat_backend(store)
 
     def _log_banner(self) -> None:
         """Log the startup banner with configuration details."""
