@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+
+from src.wechat.wcdb_paths import resolve_wcdb_dll
 
 
 @dataclass(frozen=True)
@@ -25,22 +26,6 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def resolve_wcdb_dll(project_root: Path) -> Path:
-    """Resolve WCDB DLL using the same candidate order as the runtime loader."""
-    source_path = Path(project_root) / "native" / "windows" / "wcdb_api.dll"
-    candidates = [source_path]
-    if getattr(sys, "frozen", False):
-        candidates = []
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            candidates.append(Path(meipass) / "native" / "windows" / "wcdb_api.dll")
-        candidates.extend([
-            Path(sys.executable).resolve().parent / "native" / "windows" / "wcdb_api.dll",
-            source_path,
-        ])
-    return next((candidate for candidate in candidates if candidate.is_file()), candidates[-1])
-
-
 def run_preflight(
     config: Any,
     project_root: Path,
@@ -55,9 +40,10 @@ def run_preflight(
         errors.append("CLASS_ASSISTANT_GROUPS must contain explicit stable chat_id values")
     else:
         try:
-            if not all(isinstance(group, str) for group in raw_groups):
+            materialized = tuple(raw_groups)
+            if not all(isinstance(group, str) for group in materialized):
                 raise TypeError("group values must be strings")
-            groups = tuple(group.strip() for group in raw_groups)
+            groups = tuple(group.strip() for group in materialized)
         except TypeError:
             errors.append("CLASS_ASSISTANT_GROUPS must be an iterable of strings")
     if not groups or any(not group or group == "*" for group in groups):

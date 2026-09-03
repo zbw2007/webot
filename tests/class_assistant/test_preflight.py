@@ -11,6 +11,7 @@ from src.class_assistant.preflight import (
     resolve_wcdb_dll,
     run_preflight,
 )
+from src.wechat.wcdb_paths import wcdb_dll_candidates
 
 
 def config(**overrides):
@@ -108,9 +109,9 @@ def test_frozen_dll_resolution_matches_loader_priority(tmp_path, monkeypatch):
     source_dll = source_root / "native" / "windows" / "wcdb_api.dll"
     exe_dll.write_bytes(b"exe")
     source_dll.write_bytes(b"source")
-    monkeypatch.setattr("src.class_assistant.preflight.sys.frozen", True, raising=False)
-    monkeypatch.setattr("src.class_assistant.preflight.sys._MEIPASS", str(meipass), raising=False)
-    monkeypatch.setattr("src.class_assistant.preflight.sys.executable", str(exe_dir / "bot.exe"))
+    monkeypatch.setattr("src.wechat.wcdb_paths.sys.frozen", True, raising=False)
+    monkeypatch.setattr("src.wechat.wcdb_paths.sys._MEIPASS", str(meipass), raising=False)
+    monkeypatch.setattr("src.wechat.wcdb_paths.sys.executable", str(exe_dir / "bot.exe"))
     assert resolve_wcdb_dll(source_root) == exe_dll
     meipass_dll.write_bytes(b"meipass")
     assert resolve_wcdb_dll(source_root) == meipass_dll
@@ -121,9 +122,9 @@ def test_frozen_resolution_without_meipass_does_not_raise(tmp_path, monkeypatch)
     dll = source_root / "native" / "windows" / "wcdb_api.dll"
     dll.parent.mkdir(parents=True)
     dll.write_bytes(b"source")
-    monkeypatch.setattr("src.class_assistant.preflight.sys.frozen", True, raising=False)
-    monkeypatch.delattr("src.class_assistant.preflight.sys._MEIPASS", raising=False)
-    monkeypatch.setattr("src.class_assistant.preflight.sys.executable", str(tmp_path / "bot.exe"))
+    monkeypatch.setattr("src.wechat.wcdb_paths.sys.frozen", True, raising=False)
+    monkeypatch.delattr("src.wechat.wcdb_paths.sys._MEIPASS", raising=False)
+    monkeypatch.setattr("src.wechat.wcdb_paths.sys.executable", str(tmp_path / "bot.exe"))
     assert resolve_wcdb_dll(source_root) == dll
 
 
@@ -133,6 +134,60 @@ def test_non_string_groups_are_rejected(tmp_path, raw_groups):
     report = run_preflight(config(class_assistant_groups=raw_groups), tmp_path, [digest])
     assert report.ok is False
     assert any("group" in error.lower() for error in report.errors)
+
+
+def test_generator_groups_are_materialized_once_and_accepted(tmp_path):
+    digest = put_dll(tmp_path)
+    report = run_preflight(
+        config(class_assistant_groups=(group for group in ["class@chatroom"])),
+        tmp_path,
+        [digest],
+    )
+    assert report.ok is True
+
+
+def test_generator_groups_with_invalid_item_are_rejected(tmp_path):
+    digest = put_dll(tmp_path)
+    report = run_preflight(
+        config(class_assistant_groups=(group for group in ["class@chatroom", 123])),
+        tmp_path,
+        [digest],
+    )
+    assert report.ok is False
+    assert any("group" in error.lower() for error in report.errors)
+
+
+def test_shared_wcdb_resolver_uses_same_candidates_as_preflight(tmp_path, monkeypatch):
+    meipass = tmp_path / "meipass"
+    exe_dir = tmp_path / "exe"
+    source_root = tmp_path / "source"
+    monkeypatch.setattr("src.wechat.wcdb_paths.sys.frozen", True, raising=False)
+    monkeypatch.setattr("src.wechat.wcdb_paths.sys._MEIPASS", str(meipass), raising=False)
+    monkeypatch.setattr("src.wechat.wcdb_paths.sys.executable", str(exe_dir / "bot.exe"))
+    expected = (
+        meipass / "native" / "windows" / "wcdb_api.dll",
+        exe_dir / "native" / "windows" / "wcdb_api.dll",
+        source_root / "native" / "windows" / "wcdb_api.dll",
+    )
+    assert wcdb_dll_candidates(source_root) == expected
+    assert resolve_wcdb_dll(source_root) == expected[-1]
+
+
+def test_runtime_loader_uses_shared_wcdb_resolver_priority(tmp_path, monkeypatch):
+    from src.wechat.wcdb_client import _find_dll
+
+    expected = tmp_path / "native" / "windows" / "wcdb_api.dll"
+    expected.parent.mkdir(parents=True)
+    expected.write_bytes(b"exe")
+    seen = {}
+
+    def resolve(source_root):
+        seen["source_root"] = source_root
+        return expected
+
+    monkeypatch.setattr("src.wechat.wcdb_client.resolve_wcdb_dll", resolve)
+    assert _find_dll() == (str(expected.parent), str(expected))
+    assert seen["source_root"] == Path(__file__).resolve().parents[2]
 
 
 def test_non_string_hash_allowlist_is_rejected_without_crashing(tmp_path):

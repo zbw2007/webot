@@ -10,8 +10,9 @@ import hashlib
 import json
 import logging
 import os
-import sys
 from pathlib import Path
+
+from src.wechat.wcdb_paths import resolve_wcdb_dll
 
 logger = logging.getLogger(__name__)
 
@@ -191,23 +192,11 @@ def _read_gbk_string(ptr):
 
 def _find_dll():
     """Find the bundled wcdb_api.dll."""
-    candidates = [
-        Path(__file__).resolve().parent.parent.parent / "native" / "windows" / "wcdb_api.dll",
-    ]
-    if getattr(sys, "frozen", False):
-        candidates = []
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            candidates.append(Path(meipass) / "native" / "windows" / "wcdb_api.dll")
-        candidates.extend([
-            Path(sys.executable).resolve().parent / "native" / "windows" / "wcdb_api.dll",
-            Path(__file__).resolve().parent.parent.parent / "native" / "windows" / "wcdb_api.dll",
-        ])
-
-    for c in candidates:
-        if c.is_file():
-            logger.info("Found wcdb_api.dll at: %s", c)
-            return str(c.parent), str(c)
+    source_root = Path(__file__).resolve().parent.parent.parent
+    dll_path = resolve_wcdb_dll(source_root)
+    if dll_path.is_file():
+        logger.info("Found wcdb_api.dll at: %s", dll_path)
+        return str(dll_path.parent), str(dll_path)
 
     raise FileNotFoundError(
         "wcdb_api.dll not found. Please place it in the native/windows/ folder next to the EXE."
