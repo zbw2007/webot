@@ -7,7 +7,7 @@
 - 上游：`https://github.com/GuMu599/webot.git`
 - 基线 commit：`19b82a2f941eeebcaed37e386c34c96bba69a23d`
 - 当前分支：`feature/class-assistant`
-- 当前 HEAD：以提交后的 `git rev-parse HEAD` 结果为准（本记录随 Checkpoint 5 提交更新）
+- 当前 HEAD：`180ae3e9c74271fb3eedce61a9aa22b802289249`
 - GitHub Fork：`https://github.com/zbw2007/webot.git`
 - Fork 推送日期：2026-09-03（Asia/Shanghai）
 - 初始 Git 状态：下载后工作树干净；CowAgent 目录未触碰。
@@ -34,7 +34,7 @@ pip check -> No broken requirements found.
 
 上游全量测试仍有与本功能无关的既有失败：`MAX_RETRIES` 校验、Feishu secret 展示断言，以及浅克隆缺少 macOS 工具文件导致的测试失败。没有修改这些基线问题。
 
-阶段一至四提交：`4f60227`（Fork/基线记录）、`376c30d`（前端锁定）、`89b929e` 至 `b4a806b`（WCDB preflight、只读群元数据发现、生命周期及日志脱敏加固）。Fork 已绑定到 `https://github.com/zbw2007/webot.git`；前端使用 npm 官方源完成安装并生成 `ui/package-lock.json`；`npm audit --omit=dev` 报告 0 vulnerabilities，`npm run build` 已通过（仅有 Vite CommonJS 配置和 chunk 体积提示）。
+阶段一至五提交：`4f60227`（Fork/基线记录）、`376c30d`（前端锁定）、`89b929e` 至 `b4a806b`（WCDB preflight、只读群元数据发现、生命周期及日志脱敏加固），以及 `180ae3e`（Checkpoint 5 离线验收覆盖与文档更新）。Fork 已绑定到 `https://github.com/zbw2007/webot.git`；前端使用 npm 官方源完成安装并生成 `ui/package-lock.json`；`npm audit --omit=dev` 报告 0 vulnerabilities，`npm run build` 已通过（仅有 Vite CommonJS 配置和 chunk 体积提示）。
 
 ## 安全状态
 
