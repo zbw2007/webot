@@ -881,6 +881,97 @@ def test_stop_closes_send_gate_before_reply_worker_can_send():
     assert sent == []
 
 
+def test_send_text_holds_gate_and_allows_inflight_send_to_finish():
+    backend = WcdbBackend(groups=["class@chatroom"])
+    backend._running = True
+    backend._talker_ids = {"class@chatroom": "class@chatroom"}
+    entered = threading.Event()
+    release = threading.Event()
+    sent = []
+
+    def send(*_args):
+        entered.set()
+        release.wait(timeout=2)
+        sent.append(True)
+        return True
+
+    backend._send_and_confirm = send
+    sender = threading.Thread(
+        target=lambda: sent.append(backend.send_text("class@chatroom", "reply")),
+    )
+    sender.start()
+    assert entered.wait(timeout=1)
+
+    stopper = threading.Thread(target=backend.stop)
+    stopper.start()
+    time.sleep(0.05)
+    assert stopper.is_alive()
+    release.set()
+    sender.join(timeout=2)
+    stopper.join(timeout=2)
+    assert not sender.is_alive()
+    assert not stopper.is_alive()
+    assert sent.count(True) == 2
+
+
+def test_send_text_after_stop_never_calls_sender():
+    backend = WcdbBackend(groups=["class@chatroom"])
+    backend._running = True
+    backend._talker_ids = {"class@chatroom": "class@chatroom"}
+    called = []
+    backend._send_and_confirm = lambda *_args: called.append(True) or True
+    backend.stop()
+    assert backend.send_text("class@chatroom", "reply") is False
+    assert called == []
+
+
+def test_validate_send_target_reads_mapping_under_client_lock(monkeypatch):
+    backend = WcdbBackend(groups=["class@chatroom"])
+    backend._client = object()
+    backend._talker_ids = {"class@chatroom": "class@chatroom"}
+    backend._window.find_hwnd = lambda: 1
+    backend._window._validate_hwnd = lambda _hwnd: True
+    backend._window._foreground_matches = lambda _hwnd: True
+    backend._window._verify_chat_title = lambda _hwnd, _name: True
+    backend._client_lock.acquire()
+    result = []
+    thread = threading.Thread(target=lambda: result.append(
+        backend.validate_send_target("class@chatroom", "class@chatroom")
+    ))
+    thread.start()
+    time.sleep(0.05)
+    assert thread.is_alive()
+    backend._client_lock.release()
+    thread.join(timeout=2)
+    assert result == [True]
+
+
+def test_stopped_no_reply_does_not_commit_cursor_or_known_id():
+    backend = WcdbBackend(groups=["class@chatroom"])
+    backend._running = True
+    standardized = {"timestamp": 1, "message_id": "m-no-reply", "content": "hello"}
+    callback_ready = threading.Event()
+    callback_release = threading.Event()
+
+    def callback(_message):
+        callback_ready.set()
+        callback_release.wait(timeout=2)
+        return None
+
+    worker = threading.Thread(target=backend._handle_message, args=(
+        "class@chatroom", "class@chatroom", standardized, callback,
+    ))
+    worker.start()
+    assert callback_ready.wait(timeout=1)
+    backend.stop()
+    callback_release.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert "m-no-reply" not in backend._known_ids
+    assert backend._poll_cursors == {}
+    assert backend._inflight == set()
+
+
 def test_stop_cancels_queued_callback_futures():
     backend = WcdbBackend(groups=["class@chatroom"])
     backend._running = True

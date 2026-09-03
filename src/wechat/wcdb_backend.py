@@ -413,12 +413,15 @@ class WcdbBackend(AbstractWeChatBackend):
         if not content:
             return False
 
-        group_name = self._talker_to_name(chat_id)
-        if not group_name:
-            logger.error("Cannot resolve send target")
-            return False
-
-        return self._send_and_confirm(group_name, chat_id, content)
+        with self._send_lock:
+            if not self._running:
+                return False
+            with self._client_lock:
+                group_name = self._talker_to_name_locked(chat_id)
+            if not group_name:
+                logger.error("Cannot resolve send target")
+                return False
+            return self._send_and_confirm(group_name, chat_id, content)
 
     def validate_send_target(self, chat_id: str, group_name: str) -> bool:
         """Validate the backend-owned WeChat window before a real send.
@@ -430,7 +433,8 @@ class WcdbBackend(AbstractWeChatBackend):
         if not chat_id or not group_name:
             return False
         try:
-            resolved = self._talker_to_name(chat_id)
+            with self._client_lock:
+                resolved = self._talker_to_name_locked(chat_id)
             if resolved != group_name:
                 return False
             hwnd = self._window.find_hwnd()
@@ -696,7 +700,8 @@ class WcdbBackend(AbstractWeChatBackend):
         except Exception:
             logger.warning("Failed to persist group names")
 
-    def _talker_to_name(self, talker_id: str) -> str:
+    def _talker_to_name_locked(self, talker_id: str) -> str:
+        """Resolve a talker; caller must hold ``_client_lock``."""
         fallback = ""
         for name, tid in self._talker_ids.items():
             if tid == talker_id:
@@ -705,6 +710,10 @@ class WcdbBackend(AbstractWeChatBackend):
                 if name != talker_id:
                     return name
         return fallback
+
+    def _talker_to_name(self, talker_id: str) -> str:
+        with self._client_lock:
+            return self._talker_to_name_locked(talker_id)
 
     # ── Message polling ──────────────────────────────────────────────
 
@@ -868,7 +877,8 @@ class WcdbBackend(AbstractWeChatBackend):
                 else:
                     logger.error("Reply failed; check WeChat window")
             else:
-                success = True
+                with self._send_lock:
+                    success = self._running
         except Exception:
             logger.error("Unhandled error in callback worker")
         finally:
