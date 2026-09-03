@@ -72,6 +72,18 @@ def test_whitespace_wildcard_group_is_reported(tmp_path):
     assert any("group" in error.lower() for error in report.errors)
 
 
+@pytest.mark.parametrize("raw_group", ["all", " ALL ", "All", "aLl"])
+def test_auto_discovery_wildcard_group_is_reported(tmp_path, raw_group):
+    put_dll(tmp_path)
+    report = run_preflight(
+        config(class_assistant_groups=[raw_group]),
+        tmp_path,
+        allowed_hashes=["a" * 64],
+    )
+    assert report.ok is False
+    assert any("group" in error.lower() for error in report.errors)
+
+
 def test_hash_mismatch_is_reported(tmp_path):
     put_dll(tmp_path, b"unreviewed dll")
     report = run_preflight(config(), tmp_path, allowed_hashes=["a" * 64])

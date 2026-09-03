@@ -50,7 +50,7 @@ def run_preflight(
             groups = tuple(group.strip() for group in materialized)
         except Exception:
             errors.append("CLASS_ASSISTANT_GROUPS must be an iterable of strings")
-    if not groups or any(not group or group == "*" for group in groups):
+    if not groups or any(not group or group == "*" or group.lower() == "all" for group in groups):
         errors.append(
             "CLASS_ASSISTANT_GROUPS must contain explicit stable chat_id values"
         )
