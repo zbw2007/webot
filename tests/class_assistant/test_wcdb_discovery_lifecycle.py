@@ -83,6 +83,11 @@ class SessionClient:
         self.close_calls += 1
 
 
+class ExplodingGroupName(str):
+    def casefold(self):
+        raise RuntimeError("group name resolution failed")
+
+
 def test_reinitialize_serializes_close_and_discovery_client_calls(monkeypatch):
     closed = threading.Event()
     old_client = LifecycleClient(closed)
@@ -128,6 +133,25 @@ def test_reinitialize_clears_stale_mapping_when_new_client_has_no_match(monkeypa
     monkeypatch.setattr(backend._window, "find_hwnd", lambda: None)
 
     backend._reinitialize()
+
+    assert backend._talker_ids == {}
+    assert backend._talker_to_name("old@chatroom") == ""
+
+
+def test_resolve_groups_discards_partial_mapping_when_resolution_raises():
+    client = SessionClient([
+        {"username": "first@chatroom", "displayName": "First"},
+        {"username": "second@chatroom", "displayName": "Second"},
+    ])
+    backend = WcdbBackend(groups=["First", ExplodingGroupName("Second")])
+    backend._client = client
+
+    try:
+        backend._resolve_groups()
+    except RuntimeError as exc:
+        assert str(exc) == "group name resolution failed"
+    else:
+        raise AssertionError("expected group resolution to fail")
 
     assert backend._talker_ids == {}
 

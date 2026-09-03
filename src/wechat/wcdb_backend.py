@@ -336,14 +336,15 @@ class WcdbBackend(AbstractWeChatBackend):
             logger.error("Class assistant groups must be explicit; refusing auto-discovery")
             return
 
+        resolved_talker_ids: dict[str, str] = {}
         if auto_discover:
             for username, info in all_chatrooms.items():
-                self._talker_ids[info["name"]] = username
+                resolved_talker_ids[info["name"]] = username
             logger.info(
                 "Auto-discovered %d group chats: %s",
-                len(self._talker_ids), list(self._talker_ids.keys()),
+                len(resolved_talker_ids), list(resolved_talker_ids.keys()),
             )
-            self._groups = list(self._talker_ids.keys())
+            self._groups = list(resolved_talker_ids.keys())
 
         else:
             # Manual mode: stable chat IDs are preferred.  Display-name
@@ -353,10 +354,10 @@ class WcdbBackend(AbstractWeChatBackend):
                 # Direct lookup: maybe group_name IS a stable username such
                 # as 20968749111@chatroom.
                 if group_name in all_chatrooms:
-                    self._talker_ids[group_name] = group_name
+                    resolved_talker_ids[group_name] = group_name
                     display = all_chatrooms[group_name]["name"]
                     if display and display != group_name:
-                        self._talker_ids[display] = group_name
+                        resolved_talker_ids[display] = group_name
                     logger.info("Resolved '%s' as direct username", group_name)
                     continue
 
@@ -369,7 +370,7 @@ class WcdbBackend(AbstractWeChatBackend):
                 ]
                 if len(candidates) == 1:
                     found = candidates[0]
-                    self._talker_ids[group_name] = found
+                    resolved_talker_ids[group_name] = found
                     logger.info("Resolved '%s' -> %s (display='%s')", group_name, found, all_chatrooms[found]["name"])
                 elif len(candidates) > 1:
                     logger.error("Refusing ambiguous group '%s'; matches=%s", group_name, candidates)
@@ -378,6 +379,10 @@ class WcdbBackend(AbstractWeChatBackend):
                         "Could not resolve group '%s'. Available: %s",
                         group_name, list(all_chatrooms.keys()),
                     )
+
+        # Commit only after complete resolution so an exception cannot expose
+        # a partial mapping from this client.
+        self._talker_ids = resolved_talker_ids
 
         # Persist chat_id -> display_name so the web UI can show
         # human-readable group names in the nickname dropdown.
