@@ -356,11 +356,16 @@ class WcdbBackend(AbstractWeChatBackend):
                     )
                     time.sleep(wait)
         finally:
-            # Drain in-flight callbacks gracefully
-            self._pool.shutdown(wait=True, cancel_futures=True)
-            self._pool = None
-            with self._client_lock:
-                self._close_client_locked()
+            try:
+                # Drain in-flight callbacks gracefully
+                self._pool.shutdown(wait=True, cancel_futures=True)
+            finally:
+                self._pool = None
+                with self._client_lock:
+                    self._close_client_locked()
+                # Release leases even if shutdown, client close, or the poll
+                # loop exited through an exception or KeyboardInterrupt.
+                self._release_poll_leases()
         logger.info("WcdbBackend stopped.")
 
     def _close_client_locked(self) -> None:
@@ -674,12 +679,16 @@ class WcdbBackend(AbstractWeChatBackend):
 
     def _poll_cycle(self, callback: MessageCallback) -> None:
         for group_name in list(self._groups):
-            if not self._running:
-                break
-            talker = self._talker_ids.get(group_name)
-            if not talker:
-                continue
-            self._poll_group(group_name, talker, callback)
+            # Take the client-session mapping snapshot and dispatch it while
+            # holding the same lifecycle lock.  Reinitialization/stop cannot
+            # then replace the client or clear leases between those actions.
+            with self._lease_lock:
+                if not self._running:
+                    break
+                talker = self._talker_ids.get(group_name)
+                if not talker:
+                    continue
+                self._poll_group_locked(group_name, talker, callback)
         # Check shutdown signal before sleeping so stop() is responsive
         if not self._running:
             return

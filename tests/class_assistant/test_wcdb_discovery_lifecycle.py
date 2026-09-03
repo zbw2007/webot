@@ -146,6 +146,66 @@ def test_start_closes_client_when_no_configured_groups_resolve(monkeypatch):
     assert backend._client is None
 
 
+def test_start_releases_poll_leases_when_poll_loop_exits(monkeypatch):
+    store = RecordingLeaseStore()
+    client = SessionClient([{"username": "class@chatroom", "displayName": "Class"}])
+    backend = WcdbBackend(groups=["class@chatroom"], store=store, poll_sec=0)
+    monkeypatch.setattr(wcdb_backend, "WcdbNativeClient", lambda: client)
+    monkeypatch.setattr(backend._window, "find_hwnd", lambda: None)
+    server = importlib.import_module("src.web.server")
+    monkeypatch.setattr(server, "is_shutting_down", lambda: False)
+    monkeypatch.setattr(backend, "_poll_cycle", lambda _callback: setattr(backend, "_running", False))
+
+    backend.start(lambda _message: None)
+
+    assert backend._leased_talkers == set()
+    assert len(store.calls) == 1
+    assert client.close_calls == 1
+
+
+def test_poll_cycle_holds_lease_lock_while_snapshot_is_dispatched():
+    entered_lookup = threading.Event()
+    allow_lookup = threading.Event()
+    reinit_started = threading.Event()
+    reinit_finished = threading.Event()
+
+    class CoordinatedMapping(dict):
+        def get(self, key, default=None):
+            entered_lookup.set()
+            allow_lookup.wait(timeout=2)
+            return super().get(key, default)
+
+    backend = WcdbBackend(groups=["Class"], poll_sec=0)
+    backend._running = True
+    backend._talker_ids = CoordinatedMapping({"Class": "old@chatroom"})
+    backend._poll_group_locked = lambda *_args: None
+
+    def lifecycle_operation():
+        with backend._lease_lock:
+            reinit_started.set()
+            reinit_finished.set()
+
+    backend._reinitialize = lifecycle_operation
+
+    polling = threading.Thread(target=backend._poll_cycle, args=(lambda _message: None,))
+    polling.start()
+    assert entered_lookup.wait(timeout=2)
+
+    # A lifecycle operation must not pass the lease lock between mapping
+    # snapshot and dispatch.  The stub represents reinitialization.
+    lifecycle = threading.Thread(target=backend._reinitialize)
+    lifecycle.start()
+    time.sleep(0.05)
+    assert not reinit_started.is_set()
+
+    allow_lookup.set()
+    polling.join(timeout=2)
+    lifecycle.join(timeout=2)
+    assert not polling.is_alive()
+    assert not lifecycle.is_alive()
+    assert reinit_finished.is_set()
+
+
 def test_reinitialize_clears_stale_mapping_when_new_client_has_no_match(monkeypatch):
     backend = WcdbBackend(groups=["missing@chatroom"])
     old_client = SessionClient([])
