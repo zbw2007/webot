@@ -32,7 +32,11 @@ def run_preflight(
     allowed_hashes: Iterable[str] = (),
 ) -> PreflightReport:
     errors: list[str] = []
-    raw_groups = getattr(config, "class_assistant_groups", None)
+    try:
+        raw_groups = getattr(config, "class_assistant_groups", None)
+    except Exception:
+        raw_groups = None
+        errors.append("CLASS_ASSISTANT_GROUPS could not be read")
     if isinstance(raw_groups, str):
         raw_groups = raw_groups.split(",")
     groups: tuple[str, ...] = ()
@@ -44,7 +48,7 @@ def run_preflight(
             if not all(isinstance(group, str) for group in materialized):
                 raise TypeError("group values must be strings")
             groups = tuple(group.strip() for group in materialized)
-        except TypeError:
+        except Exception:
             errors.append("CLASS_ASSISTANT_GROUPS must be an iterable of strings")
     if not groups or any(not group or group == "*" for group in groups):
         errors.append(
@@ -57,12 +61,29 @@ def run_preflight(
             "REAL_SEND_ENABLED requires an explicit post-rollout configuration with DRY_RUN=false"
         )
 
-    dll = resolve_wcdb_dll(project_root)
-    if not dll.is_file():
+    try:
+        dll = resolve_wcdb_dll(project_root)
+        dll_exists = dll.is_file()
+    except Exception:
+        return PreflightReport(
+            False,
+            "",
+            "",
+            tuple(errors) + ("native/windows/wcdb_api.dll could not be read",),
+        )
+    if not dll_exists:
         errors.append("native/windows/wcdb_api.dll is missing")
         return PreflightReport(False, str(dll), "", tuple(errors))
 
-    digest = _sha256(dll)
+    try:
+        digest = _sha256(dll)
+    except Exception:
+        return PreflightReport(
+            False,
+            str(dll),
+            "",
+            tuple(errors) + ("native/windows/wcdb_api.dll could not be read",),
+        )
     allowed = set()
     invalid_hash = False
     try:
@@ -73,7 +94,7 @@ def run_preflight(
             normalized = value.strip().lower()
             if normalized:
                 allowed.add(normalized)
-    except TypeError:
+    except Exception:
         invalid_hash = True
     if invalid_hash:
         errors.append("WCDB_ALLOWED_SHA256 must contain only string hashes")

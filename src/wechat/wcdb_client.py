@@ -55,7 +55,17 @@ else:
 
 # ── DLL loading ──────────────────────────────────────────────────────
 
-_kernel32 = ct.WinDLL("kernel32", use_last_error=True)
+_kernel32 = (
+    ct.WinDLL("kernel32", use_last_error=True)
+    if hasattr(ct, "WinDLL")
+    else None
+)
+
+
+def _require_kernel32():
+    if _kernel32 is None:
+        raise RuntimeError("WCDB WinAPI operations require Windows")
+    return _kernel32
 
 
 def _apply_drm_patch(dll_handle, dll_path):
@@ -77,9 +87,10 @@ def _apply_drm_patch(dll_handle, dll_path):
         sha = None
 
     # Apply the patch
+    kernel32 = _require_kernel32()
     patch_addr = ct.c_void_p(dll_handle + PATCH_RVA)
     old_protect = wintypes.DWORD()
-    _kernel32.VirtualProtect(
+    kernel32.VirtualProtect(
         patch_addr, 5, PAGE_EXECUTE_READWRITE, ct.byref(old_protect)
     )
 
@@ -95,7 +106,7 @@ def _apply_drm_patch(dll_handle, dll_path):
             buf[1],
         )
 
-    _kernel32.VirtualProtect(
+    kernel32.VirtualProtect(
         patch_addr, 5, old_protect, ct.byref(wintypes.DWORD())
     )
 
@@ -132,11 +143,12 @@ def _read_gbk_string(ptr):
     if not ptr or ptr.value == 0:
         return ""
     addr = ptr.value
+    kernel32 = _require_kernel32()
 
     # Validate pointer with VirtualQuery before attempting to read
     try:
         mbi = _MEMORY_BASIC_INFORMATION()
-        if not _kernel32.VirtualQuery(
+        if not kernel32.VirtualQuery(
             ct.c_void_p(addr), ct.byref(mbi), ct.sizeof(mbi)
         ):
             logger.warning(

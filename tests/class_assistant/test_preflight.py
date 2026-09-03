@@ -1,4 +1,5 @@
 import hashlib
+import importlib.util
 import sys
 import types
 from pathlib import Path
@@ -272,3 +273,49 @@ def test_bot_preflight_failure_prevents_backend_creation(monkeypatch):
     with pytest.raises(RuntimeError, match="preflight failed"):
         bot._create_checked_wechat_backend(None)
     assert created == 0
+
+
+def test_wcdb_client_imports_without_windows_windll(monkeypatch):
+    import ctypes
+
+    monkeypatch.delattr(ctypes, "WinDLL", raising=False)
+    module_name = "src.wechat.wcdb_client_no_windll"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        Path(__file__).resolve().parents[2] / "src" / "wechat" / "wcdb_client.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, module)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    assert module._kernel32 is None
+
+
+def test_preflight_fails_closed_when_groups_iteration_raises(tmp_path):
+    digest = put_dll(tmp_path)
+
+    def broken_groups():
+        raise RuntimeError("secret group payload")
+        yield "unused"
+
+    report = run_preflight(
+        config(class_assistant_groups=broken_groups()),
+        tmp_path,
+        [digest],
+    )
+    assert report.ok is False
+    assert report.errors
+    assert all("secret group payload" not in error for error in report.errors)
+
+
+def test_preflight_fails_closed_when_hash_read_raises(tmp_path, monkeypatch):
+    put_dll(tmp_path)
+    monkeypatch.setattr(
+        "src.class_assistant.preflight._sha256",
+        lambda path: (_ for _ in ()).throw(PermissionError("secret dll path")),
+    )
+    report = run_preflight(config(), tmp_path, ["a" * 64])
+    assert report.ok is False
+    assert report.dll_sha256 == ""
+    assert report.errors
+    assert all("secret dll path" not in error for error in report.errors)
