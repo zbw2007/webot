@@ -4,6 +4,7 @@ from datetime import datetime
 from src.class_assistant.service import ClassAssistantService
 from src.class_assistant.storage import Storage
 from src.wechat.wcdb_backend import WcdbBackend
+from src.wechat import wcdb_client
 
 
 class Config:
@@ -86,3 +87,50 @@ def test_wcdb_persistence_failures_do_not_log_paths_or_exception_text(tmp_path, 
     with caplog.at_level(logging.WARNING):
         original({"id@chatroom": {"wxid": "同学"}})
     assert secret not in caplog.text
+
+
+def test_wcdb_diagnostics_never_log_paths_ids_or_exception_text(monkeypatch, caplog):
+    secret_path = r"C:\Users\secret\WeChat Files\wxid_private\db_storage\session.db"
+    secret_id = "wxid_private@chatroom"
+    secret_error = "SQLITE_SECRET_ERROR_123"
+    # The resolver failure must not echo its candidate path.
+    with caplog.at_level(logging.DEBUG):
+        monkeypatch.setattr(wcdb_client, "resolve_wcdb_dll", lambda _root: __import__("pathlib").Path(secret_path))
+        try:
+            wcdb_client._find_dll()
+        except FileNotFoundError:
+            pass
+    assert secret_path not in caplog.text
+
+    client = wcdb_client.WcdbNativeClient.__new__(wcdb_client.WcdbNativeClient)
+    client._config = {"myWxid": "wxid_private", "dbPath": secret_path}
+    client._nicknames = {}
+    client._handle = 1
+    client._dll = type("Dll", (), {"wcdb_get_group_members": object()})()
+    with caplog.at_level(logging.WARNING):
+        monkeypatch.setattr(wcdb_client, "_find_wxid_and_dbpath", lambda _custom="": (_ for _ in ()).throw(
+            PermissionError(f"{secret_error}: {secret_path} {secret_id}")))
+        try:
+            wcdb_client._find_wxid_and_dbpath(secret_path)
+        except PermissionError:
+            pass
+        monkeypatch.setattr(client, "_call_json", lambda *_args: (_ for _ in ()).throw(
+            RuntimeError(f"{secret_error}: {secret_id}")))
+        client.get_group_members(secret_id)
+    assert secret_path not in caplog.text
+    assert secret_id not in caplog.text
+    assert secret_error not in caplog.text
+
+
+def test_wcdb_json_parse_logs_do_not_include_payload_or_exception(monkeypatch, caplog):
+    client = wcdb_client.WcdbNativeClient.__new__(wcdb_client.WcdbNativeClient)
+    client._dll = type("Dll", (), {"wcdb_free_string": lambda *_args: None})()
+    def fn(*args):
+        args[-1]._obj.value = 1
+        return 0
+    payload = '{"private_secret":"JSON_SECRET_456"}'
+    monkeypatch.setattr(wcdb_client, "_read_gbk_string", lambda _out: payload + " trailing")
+    with caplog.at_level(logging.DEBUG):
+        assert client._call_json(fn) == {}
+    assert "JSON_SECRET_456" not in caplog.text
+    assert "trailing" not in caplog.text

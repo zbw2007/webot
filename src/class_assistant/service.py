@@ -126,7 +126,7 @@ class ClassAssistantService:
         except Exception as exc:
             if str(exc) == "group discovery unavailable":
                 raise
-            logger.exception("Group discovery service failed")
+            logger.error("Group discovery service failed")
             raise RuntimeError("group discovery unavailable") from None
 
     def _group_allowed(self, chat_id: Any, is_group: bool) -> bool:
@@ -178,7 +178,7 @@ class ClassAssistantService:
             self._storage.insert_message(dict(message), expires_at=expires_at)
             self._messages_processed += 1
         except Exception:
-            logger.exception("Failed to persist class-assistant message")
+            logger.error("Failed to persist class-assistant message")
         return None
 
     def is_in_scope(self, message: Mapping[str, Any]) -> bool:
@@ -563,7 +563,7 @@ class ClassAssistantService:
                     audit_days=int(getattr(self.config, "audit_retention_days", 30)),
                 )
             except Exception:
-                logger.exception("Class-assistant scheduler cycle failed")
+                logger.error("Class-assistant scheduler cycle failed")
             # A minute-level poll is sufficient; scheduled_slot makes runs
             # idempotent and the daemon remains responsive to stop().
             self._stop_event.wait(60)

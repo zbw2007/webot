@@ -40,18 +40,18 @@ _DEFAULT_PATCH_BYTE = 0x02
 _env_rva = os.environ.get("WCDB_PATCH_RVA", "").strip()
 if _env_rva:
     PATCH_RVA = int(_env_rva, 16)
-    logger.info("Using custom WCDB_PATCH_RVA from env: 0x%x", PATCH_RVA)
+    logger.info("Using configured WCDB patch offset")
 else:
     PATCH_RVA = _DEFAULT_PATCH_RVA
-    logger.debug("Using default WCDB_PATCH_RVA: 0x%x", PATCH_RVA)
+    logger.debug("Using default WCDB patch offset")
 
 _env_byte = os.environ.get("WCDB_PATCH_BYTE", "").strip()
 if _env_byte:
     EXPECTED_PATCH_BYTE = int(_env_byte, 16)
-    logger.info("Using custom WCDB_PATCH_BYTE from env: 0x%x", EXPECTED_PATCH_BYTE)
+    logger.info("Using configured WCDB patch byte")
 else:
     EXPECTED_PATCH_BYTE = _DEFAULT_PATCH_BYTE
-    logger.debug("Using default WCDB_PATCH_BYTE: 0x%x", EXPECTED_PATCH_BYTE)
+    logger.debug("Using default WCDB patch byte")
 
 # ── DLL loading ──────────────────────────────────────────────────────
 
@@ -97,7 +97,7 @@ def _apply_drm_patch(dll_handle, dll_path):
     buf = (ct.c_ubyte * 5).from_address(patch_addr.value)
     if buf[1] == EXPECTED_PATCH_BYTE:
         buf[1] = 0x00
-        logger.info("DRM patch applied: RVA 0x%x 02->00", PATCH_RVA)
+        logger.info("DRM patch applied")
     elif buf[1] == 0x00:
         logger.info("DRM patch already present")
     else:
@@ -151,24 +151,16 @@ def _read_gbk_string(ptr):
         if not kernel32.VirtualQuery(
             ct.c_void_p(addr), ct.byref(mbi), ct.sizeof(mbi)
         ):
-            logger.warning(
-                "VirtualQuery failed for ptr 0x%x — skipping", addr
-            )
+            logger.warning("Pointer validation failed — skipping value")
             return ""
         if mbi.State != MEM_COMMIT:
-            logger.warning(
-                "Pointer 0x%x points to uncommitted memory (state=%d)",
-                addr, mbi.State,
-            )
+            logger.warning("Pointer validation found uncommitted memory")
             return ""
         if mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD):
-            logger.warning(
-                "Pointer 0x%x points to inaccessible memory (protect=0x%x)",
-                addr, mbi.Protect,
-            )
+            logger.warning("Pointer validation found inaccessible memory")
             return ""
-    except Exception as exc:
-        logger.warning("Pointer validation failed for 0x%x: %s", addr, exc)
+    except Exception:
+        logger.warning("Pointer validation failed")
         return ""
 
     raw = bytearray()
@@ -176,9 +168,7 @@ def _read_gbk_string(ptr):
         try:
             b = (ct.c_ubyte * 1).from_address(addr)[0]
         except (OSError, ValueError):
-            logger.warning(
-                "Access violation reading 0x%x (ptr returned by DLL)", addr
-            )
+            logger.warning("Access violation reading DLL result")
             break
         if b == 0:
             break
@@ -207,7 +197,7 @@ def _find_dll():
     source_root = Path(__file__).resolve().parent.parent.parent
     dll_path = resolve_wcdb_dll(source_root)
     if dll_path.is_file():
-        logger.info("Found wcdb_api.dll at: %s", dll_path)
+        logger.info("Found WCDB DLL")
         return str(dll_path.parent), str(dll_path)
 
     raise FileNotFoundError(
@@ -229,13 +219,9 @@ def _find_wxid_and_dbpath(custom_base_dir: str = ""):
         custom = Path(custom_base_dir)
         if custom.exists() and custom.is_dir():
             candidates.append(custom)
-            logger.info("Scanning custom WECHAT_DATA_DIR: %s", custom)
+            logger.info("Scanning configured WeChat data directory")
         else:
-            logger.warning(
-                "WECHAT_DATA_DIR=%s does not exist or is not a directory — "
-                "falling back to auto-detection",
-                custom_base_dir,
-            )
+            logger.warning("Configured WeChat data directory unavailable; using auto-detection")
 
     # 2. Default auto-detection paths
     documents = Path.home() / "Documents"
@@ -255,7 +241,7 @@ def _find_wxid_and_dbpath(custom_base_dir: str = ""):
                 reverse=True,
             )
         except PermissionError:
-            logger.warning("Permission denied reading %s — skipping", base)
+            logger.warning("Permission denied reading WeChat data directory")
             continue
 
         for wxid_dir in wxid_dirs:
@@ -264,7 +250,7 @@ def _find_wxid_and_dbpath(custom_base_dir: str = ""):
             if session_db.exists():
                 wxid = wxid_dir.name
                 source = "custom" if base == candidates[0] and custom_base_dir else "auto"
-                logger.info("%s-detected: wxid=%s db=%s", source, wxid, str(base))
+                logger.info("WeChat data directory detected")
                 return wxid, str(base)
 
     raise FileNotFoundError(
@@ -311,10 +297,8 @@ class WcdbNativeClient:
             from src.config import load_config
             config = load_config()
             custom_dir = config.wechat_data_dir
-        except Exception as e:
-            logger.warning(
-                "Config load failed — falling back to auto-detection: %s", e
-            )
+        except Exception:
+            logger.warning("Config load failed; using auto-detection")
 
         wxid, db_path = _find_wxid_and_dbpath(custom_dir)
         self._config = {
@@ -419,11 +403,7 @@ class WcdbNativeClient:
         import os as _os
 
         for attempt, (key_candidate, source_label) in enumerate(self._key_candidates()):
-            logger.info(
-                "Trying WCDB key source #%d: %s (len=%d)",
-                attempt + 1, source_label,
-                len(key_candidate) if key_candidate else 0,
-            )
+            logger.info("Trying WCDB key source #%d", attempt + 1)
 
             # Build key variants to try.  The DLL accepts 64-char hex strings
             # (ret=0) but explicitly rejects raw bytes (ret=-3).  Only try hex.
@@ -446,10 +426,7 @@ class WcdbNativeClient:
                         ct.byref(handle),
                     )
                     if ret != 0:
-                        logger.info(
-                            "wcdb_open_account FAIL (ret=%d) fmt=%s path=%s source=%s",
-                            ret, key_fmt, path_label, source_label,
-                        )
+                        logger.info("WCDB account open attempt failed")
                         continue
 
                     self._handle = handle.value
@@ -461,28 +438,19 @@ class WcdbNativeClient:
                             len(sessions) if isinstance(sessions, list)
                             else len(sessions.get("sessions", sessions))
                         )
-                        logger.info(
-                            "Key WORKS (source=%s, fmt=%s, path=%s): %d sessions found",
-                            source_label, key_fmt, path_label, session_count,
-                        )
+                        logger.info("WCDB key accepted; sessions=%d", session_count)
                         # Persist key for next cold start
                         _os.environ["WCDB_KEY"] = key_candidate
                         self._save_key_to_env(key_candidate)
-                        logger.info("Database opened: %s", db_path)
+                        logger.info("WCDB database opened")
                         self._load_nickname_cache()
                         return True
 
                     # Key didn't work — close and try next variant
-                    logger.info(
-                        "Key from %s (fmt=%s, path=%s) → 0 sessions",
-                        source_label, key_fmt, path_label,
-                    )
+                    logger.info("WCDB key produced no sessions")
                     self._close_handle()
 
-            logger.warning(
-                "Key from %s failed all formats — trying next source...",
-                source_label,
-            )
+            logger.warning("WCDB key source failed; trying next source")
 
         raise RuntimeError(
             "KEY_MISSING: 密钥未配置。"
@@ -519,9 +487,9 @@ class WcdbNativeClient:
             tmp = env_path.with_suffix(".tmp")
             tmp.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
             os.replace(tmp, env_path)
-            logger.debug("Persisted WCDB_KEY to %s", env_path)
-        except Exception as e:
-            logger.debug("Failed to persist WCDB_KEY: %s", e)
+            logger.debug("Persisted WCDB key")
+        except Exception:
+            logger.debug("Failed to persist WCDB key")
 
     def _key_candidates(self):
         """Generate (key, label) pairs in priority order.
@@ -561,8 +529,8 @@ class WcdbNativeClient:
                 nick = (c.get("nickName") or c.get("remark") or c.get("displayName") or "").strip()
                 if username and nick:
                     self._nicknames[username] = nick
-        except Exception as e:
-            logger.warning("Failed to load contacts: %s", e)
+        except Exception:
+            logger.warning("Failed to load contacts")
 
         # Manual overrides from nicknames.json
         nick_file = Path("data/nicknames.json")
@@ -575,8 +543,8 @@ class WcdbNativeClient:
                     if name and name.strip():
                         self._nicknames[wxid] = name.strip()
                 logger.info("Loaded %d manual nickname overrides", len(manual))
-            except Exception as e:
-                logger.warning("Failed to load nicknames.json: %s", e)
+            except Exception:
+                logger.warning("Failed to load nickname cache")
 
     # ── Query methods ─────────────────────────────────────────────────
 
@@ -585,22 +553,21 @@ class WcdbNativeClient:
         out = ct.c_void_p()
         ret = func(*args, ct.byref(out))
         if ret != 0:
-            logger.warning("WCDB call %s failed: ret=%d", func.__name__, ret)
+            logger.warning("WCDB call failed: ret=%d", ret)
             return None
         if not out.value:
-            logger.debug("WCDB call %s returned null pointer", func.__name__)
+            logger.debug("WCDB call returned no value")
             return {}
         try:
             data = _read_gbk_string(out)
             self._dll.wcdb_free_string(out)
             return json.loads(data)
-        except json.JSONDecodeError as e:
-            logger.debug("JSON parse error: %s", e)
+        except json.JSONDecodeError:
+            logger.debug("WCDB JSON response could not be parsed")
             self._dll.wcdb_free_string(out)
             return {}
-        except Exception as e:
-            logger.warning("Unexpected error in _call_json for %s: %s",
-                           func.__name__, e)
+        except Exception:
+            logger.warning("WCDB JSON call failed")
             self._dll.wcdb_free_string(out)
             return {}
 
@@ -615,9 +582,9 @@ class WcdbNativeClient:
             return result
         if isinstance(result, dict):
             keys = list(result.keys())
-            logger.info("Got sessions dict with keys: %s", keys)
+            logger.info("Got sessions dictionary; fields=%d", len(keys))
             return result.get("sessions", result.get("data", []))
-        logger.warning("wcdb_get_sessions returned unexpected type: %s", type(result))
+        logger.warning("WCDB sessions response had unexpected type")
         return []
 
     def get_messages(self, talker, limit=200, offset=0):
@@ -649,10 +616,8 @@ class WcdbNativeClient:
             if isinstance(result, dict):
                 return result.get("names", result)
             return {}
-        except Exception as e:
-            logger.warning(
-                "wcdb_get_display_names failed: %s", e
-            )
+        except Exception:
+            logger.warning("WCDB display-name lookup failed")
             return {}
 
     def get_contacts(self, keyword="", limit=1000):
@@ -670,10 +635,8 @@ class WcdbNativeClient:
             if isinstance(result, dict):
                 return result.get("contacts", result.get("data", []))
             return []
-        except Exception as e:
-            logger.warning(
-                "wcdb_get_contacts_compact failed — disabling: %s", e
-            )
+        except Exception:
+            logger.warning("WCDB contacts lookup failed; disabling")
             self._dll.wcdb_get_contacts_compact = None
             return []
 
@@ -692,10 +655,8 @@ class WcdbNativeClient:
             if isinstance(result, dict):
                 return result.get("members", result.get("data", []))
             return []
-        except Exception as e:
-            logger.warning(
-                "wcdb_get_group_members failed: %s", e
-            )
+        except Exception:
+            logger.warning("WCDB group-member lookup failed")
             return []
 
     def resolve_nickname(self, wxid):

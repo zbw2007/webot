@@ -89,10 +89,7 @@ class WcdbBackend(AbstractWeChatBackend):
             logger.error("No groups configured. Set WECHAT_GROUPS in .env")
             return
 
-        logger.info(
-            "WcdbBackend starting (groups=%s, poll=%ss, bot=%r)",
-            self._groups, self._poll_sec, self._bot_name,
-        )
+        logger.info("WcdbBackend starting; groups=%d", len(self._groups))
 
         # Init and open database
         try:
@@ -124,7 +121,7 @@ class WcdbBackend(AbstractWeChatBackend):
         # Pre-find WeChat window
         hwnd = self._window.find_hwnd()
         if hwnd:
-            logger.info("WeChat window pre-detected: HWND=%s", hwnd)
+            logger.info("WeChat window pre-detected")
         else:
             logger.warning("WeChat window not found — will retry on first send")
 
@@ -345,7 +342,7 @@ class WcdbBackend(AbstractWeChatBackend):
         if auto_discover:
             for username, info in all_chatrooms.items():
                 resolved_talker_ids[info["name"]] = username
-            logger.info("Auto-discovered %d group chats", len(resolved_talker_ids))
+            logger.info("Auto-discovered group chats: count=%d", len(resolved_talker_ids))
             self._groups = list(resolved_talker_ids.keys())
 
         else:
@@ -360,7 +357,7 @@ class WcdbBackend(AbstractWeChatBackend):
                     display = all_chatrooms[group_name]["name"]
                     if display and display != group_name:
                         resolved_talker_ids[display] = group_name
-                    logger.info("Resolved configured group as direct username")
+                    logger.info("Resolved configured group")
                     continue
 
                 exact = [username for username, info in all_chatrooms.items()
@@ -531,35 +528,20 @@ class WcdbBackend(AbstractWeChatBackend):
             reply = callback(standardized)
             cb_elapsed = time.monotonic() - cb_start
             if cb_elapsed > 0.5:
-                logger.debug(
-                    "Callback took %.2fs (msg_id=%s, group='%s')",
-                    cb_elapsed, standardized["message_id"], group_name,
-                )
+                logger.debug("Callback exceeded expected duration: %.2fs", cb_elapsed)
 
             if reply:
-                logger.info(
-                    "Reply ready: group='%s' sender='%s' len=%d",
-                    group_name, standardized["sender_name"], len(reply),
-                )
+                logger.info("Reply ready; chars=%d", len(reply))
                 # _send_and_confirm uses window_controller (keyboard), not
                 # _client (WCDB).  Don't hold _client_lock during send —
                 # it blocks the poll loop from reading new messages.
                 success = self._send_and_confirm(group_name, talker, reply)
                 if success:
-                    logger.info(
-                        "Reply sent: group='%s' (%d chars)",
-                        group_name, len(reply),
-                    )
+                    logger.info("Reply sent; chars=%d", len(reply))
                 else:
-                    logger.error(
-                        "Reply FAILED: group='%s' — check WeChat window",
-                        group_name,
-                    )
+                    logger.error("Reply failed; check WeChat window")
         except Exception:
-            logger.exception(
-                "Unhandled error in callback worker (group='%s', sender='%s')",
-                group_name, standardized.get("sender_name", "?"),
-            )
+            logger.error("Unhandled error in callback worker")
 
     # ── Voice recognition helpers ────────────────────────────────────
 
@@ -574,7 +556,7 @@ class WcdbBackend(AbstractWeChatBackend):
             from src.voice import VoicePipeline
             self._voice = VoicePipeline(self._voice_config)
         except Exception:
-            logger.exception("VoicePipeline init failed — voice disabled")
+            logger.error("Voice pipeline initialization failed; voice disabled")
             self._voice = False
         return self._voice
 
@@ -586,7 +568,7 @@ class WcdbBackend(AbstractWeChatBackend):
         try:
             return voice.process(msg)
         except Exception:
-            logger.exception("VoicePipeline.process failed")
+            logger.error("Voice pipeline processing failed")
             return None
 
     # ── Message standardization ──────────────────────────────────────
@@ -626,10 +608,7 @@ class WcdbBackend(AbstractWeChatBackend):
         if join_match and welcome_on:
             new_member_id = join_match.group(1)
             is_system_join = True
-            logger.info(
-                "Join event detected: new_member=%s group=%s",
-                new_member_id, group_name[:20],
-            )
+            logger.info("Join event detected")
         elif join_match:
             # Welcome disabled — silently drop join messages
             return None

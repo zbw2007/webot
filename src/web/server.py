@@ -1151,7 +1151,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 try:
                     items = service.discover_groups()
                 except Exception:
-                    logger.exception("Class-assistant group discovery failed")
+                    logger.error("Class-assistant group discovery failed")
                     self._send_json_status({"ok": False, "error": "group discovery unavailable"}, 503)
                     return
                 self.send_json({"ok": True, "items": [
@@ -1199,11 +1199,11 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 self.send_json({"ok": True, "item": result})
                 return
             raise ValueError("unknown class-assistant endpoint")
-        except (KeyError, TypeError, ValueError) as exc:
-            logger.warning("Invalid class-assistant API request: %s", exc)
+        except (KeyError, TypeError, ValueError):
+            logger.warning("Invalid class-assistant API request")
             self._send_json_status({"ok": False, "error": "invalid class assistant request"}, 400)
-        except Exception as exc:
-            logger.exception("Class-assistant API request failed")
+        except Exception:
+            logger.error("Class-assistant API request failed")
             self._send_json_status({"ok": False, "error": "class assistant operation unavailable"}, 503)
 
     def _handle_request(self):
