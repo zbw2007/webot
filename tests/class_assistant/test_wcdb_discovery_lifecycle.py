@@ -163,6 +163,69 @@ def test_start_releases_poll_leases_when_poll_loop_exits(monkeypatch):
     assert client.close_calls == 1
 
 
+def test_start_releases_partial_leases_when_initial_acquisition_fails(monkeypatch):
+    class LeaseStore:
+        def __init__(self):
+            self.acquired = []
+            self.released = []
+
+        def acquire_poll_lease(self, _backend, chat_id, _owner, _expires_at):
+            self.acquired.append(chat_id)
+            return True
+
+        def release_poll_lease(self, _backend, chat_id, _owner):
+            self.released.append(chat_id)
+
+    store = LeaseStore()
+    client = SessionClient([
+        {"username": "one@chatroom", "displayName": "One"},
+        {"username": "two@chatroom", "displayName": "Two"},
+        {"username": "three@chatroom", "displayName": "Three"},
+    ])
+    backend = WcdbBackend(groups=["One", "Two", "Three"], store=store)
+    monkeypatch.setattr(wcdb_backend, "WcdbNativeClient", lambda: client)
+    monkeypatch.setattr(backend._window, "find_hwnd", lambda: None)
+    acquire_results = iter((True, True))
+
+    def acquire_then_fail(talker):
+        try:
+            owned = next(acquire_results)
+            if owned:
+                backend._leased_talkers.add(talker)
+            return owned
+        except StopIteration:
+            raise RuntimeError("lease failure")
+
+    monkeypatch.setattr(backend, "_acquire_poll_lease", acquire_then_fail)
+
+    backend.start(lambda _message: None)
+
+    assert len(store.released) == 2
+    assert backend._leased_talkers == set()
+    assert backend._pool is None
+    assert client.close_calls == 1
+
+
+def test_start_cleans_up_when_thread_pool_construction_fails(monkeypatch):
+    store = RecordingLeaseStore()
+    client = SessionClient([{"username": "class@chatroom", "displayName": "Class"}])
+    backend = WcdbBackend(groups=["Class"], store=store)
+    monkeypatch.setattr(wcdb_backend, "WcdbNativeClient", lambda: client)
+    monkeypatch.setattr(backend._window, "find_hwnd", lambda: None)
+
+    def fail_pool(*_args, **_kwargs):
+        raise RuntimeError("pool failure")
+
+    monkeypatch.setattr(wcdb_backend.concurrent.futures, "ThreadPoolExecutor", fail_pool)
+
+    backend.start(lambda _message: None)
+
+    assert backend._pool is None
+    assert backend._leased_talkers == set()
+    assert len(store.calls) == 1
+    assert client.close_calls == 1
+
+
 def test_poll_cycle_holds_lease_lock_while_snapshot_is_dispatched():
     entered_lookup = threading.Event()
     allow_lookup = threading.Event()

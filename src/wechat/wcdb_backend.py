@@ -287,14 +287,16 @@ class WcdbBackend(AbstractWeChatBackend):
                 for talker in set(self._talker_ids.values()):
                     self._acquire_poll_lease(talker)
             logger.info("WCDB database opened successfully")
-        except Exception as e:
+        except BaseException as e:
+            # Initialization may have acquired some leases before a later
+            # group fails.  Always release those leases, including when the
+            # caller interrupts startup, before propagating fatal signals.
+            with self._client_lock:
+                self._close_client_locked()
+            self._release_poll_leases()
             if isinstance(e, (KeyboardInterrupt, SystemExit)):
                 raise
             logger.error("WCDB initialization failed")
-            # If init() allocated DLL/WCDB engine but open() failed,
-            # clean up native resources so repeated retries don't leak.
-            with self._client_lock:
-                self._close_client_locked()
             try:
                 from src.web.server import update_status
                 update_status(running=False, error="WCDB initialization failed")
@@ -309,23 +311,23 @@ class WcdbBackend(AbstractWeChatBackend):
         else:
             logger.warning("WeChat window not found — will retry on first send")
 
-        self._pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="bot-cb-",
-        )
-        self._running = True
-        consecutive_errors = 0
-
-        # Import once to avoid per-iteration overhead
-        from src.web.server import is_shutting_down as _is_shutting_down
-
         try:
+            self._pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=4, thread_name_prefix="bot-cb-",
+            )
+            self._running = True
+            consecutive_errors = 0
+
+            # Import once to avoid per-iteration overhead
+            from src.web.server import is_shutting_down as _is_shutting_down
+
             while self._running and not _is_shutting_down():
                 try:
                     self._poll_cycle(callback)
                     consecutive_errors = 0
                 except KeyboardInterrupt:
                     break
-                except Exception as e:
+                except Exception:
                     consecutive_errors += 1
 
                     # After MAX_CONSECUTIVE_ERRORS consecutive failures,
@@ -339,7 +341,7 @@ class WcdbBackend(AbstractWeChatBackend):
                             self._reinitialize()
                             consecutive_errors = 0
                             continue
-                        except Exception as reinit_err:
+                        except Exception:
                             logger.error("WCDB reinitialization failed")
                             # Fall through to backoff; will retry next cycle.
                             push_error = "WCDB reinitialization failed"
@@ -355,17 +357,31 @@ class WcdbBackend(AbstractWeChatBackend):
                         consecutive_errors, wait,
                     )
                     time.sleep(wait)
-        finally:
+        except Exception:
+            # Startup failures (most notably executor construction) are
+            # reported without exposing implementation or credential details;
+            # the finally block below performs all resource cleanup.
+            logger.error("WCDB runtime startup failed")
             try:
-                # Drain in-flight callbacks gracefully
-                self._pool.shutdown(wait=True, cancel_futures=True)
-            finally:
-                self._pool = None
-                with self._client_lock:
-                    self._close_client_locked()
-                # Release leases even if shutdown, client close, or the poll
-                # loop exited through an exception or KeyboardInterrupt.
-                self._release_poll_leases()
+                from src.web.server import update_status
+                update_status(running=False, error="WCDB runtime startup failed")
+            except Exception:
+                pass
+        finally:
+            pool = self._pool
+            self._pool = None
+            if pool is not None:
+                # Drain in-flight callbacks gracefully.  Cleanup continues if
+                # an executor implementation itself raises during shutdown.
+                try:
+                    pool.shutdown(wait=True, cancel_futures=True)
+                except Exception:
+                    logger.warning("Failed to shut down callback pool")
+            with self._client_lock:
+                self._close_client_locked()
+            # Release leases even if shutdown, client close, or the poll loop
+            # exited through an exception or KeyboardInterrupt.
+            self._release_poll_leases()
         logger.info("WcdbBackend stopped.")
 
     def _close_client_locked(self) -> None:
