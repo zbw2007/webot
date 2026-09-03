@@ -91,3 +91,14 @@ def test_group_discovery_api_returns_metadata_only_and_does_not_read_messages(tm
     response = call_api(service, "/api/class-assistant/groups/discover", "POST", {})
     assert response == {"ok": True, "items": [{"chat_id": "class@chatroom", "display_name": "Class", "member_count": 4}]}
     assert calls == ["metadata"]
+
+
+def test_group_discovery_api_sanitizes_backend_errors(tmp_path):
+    service = ClassAssistantService(
+        Config(), storage=Storage(str(tmp_path / "assistant.db")),
+        group_discoverer=lambda: (_ for _ in ()).throw(
+            RuntimeError("sqlite secret path C:\\secret\\session.db api-key=top-secret chat body")
+        ),
+    )
+    response = call_api(service, "/api/class-assistant/groups/discover", "POST", {})
+    assert response == {"ok": False, "error": "group discovery unavailable"}

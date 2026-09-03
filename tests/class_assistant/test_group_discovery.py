@@ -36,5 +36,7 @@ def test_discover_groups_converts_backend_errors_to_controlled_error():
         def get_sessions(self):
             raise RuntimeError("backend unavailable")
 
-    with pytest.raises(RuntimeError, match="group discovery failed"):
+    with pytest.raises(RuntimeError, match="^group discovery unavailable$") as error:
         discover_groups(Broken())
+    assert "backend unavailable" not in str(error.value)
+    assert "C:\\secret" not in str(error.value)

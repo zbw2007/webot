@@ -92,12 +92,18 @@ class ClassAssistantService:
 
     def discover_groups(self) -> list[dict]:
         if self._group_discoverer is None:
-            raise RuntimeError("group discovery backend is not ready")
-        return [
-            {"chat_id": str(item["chat_id"]), "display_name": str(item["display_name"]),
-             "member_count": int(item["member_count"])}
-            for item in self._group_discoverer()
-        ]
+            raise RuntimeError("group discovery unavailable")
+        try:
+            return [
+                {"chat_id": str(item["chat_id"]), "display_name": str(item["display_name"]),
+                 "member_count": int(item["member_count"])}
+                for item in self._group_discoverer()
+            ]
+        except Exception as exc:
+            if str(exc) == "group discovery unavailable":
+                raise
+            logger.exception("Group discovery service failed")
+            raise RuntimeError("group discovery unavailable") from None
 
     def _group_allowed(self, chat_id: Any, is_group: bool) -> bool:
         """Apply both the immutable config whitelist and DB enable flag."""

@@ -96,9 +96,11 @@ class WcdbBackend(AbstractWeChatBackend):
 
         # Init and open database
         try:
-            self._client = WcdbNativeClient()
-            self._client.init()
-            self._client.open()
+            with self._client_lock:
+                self._client = WcdbNativeClient()
+                self._client.init()
+                self._client.open()
+                self._resolve_groups()
             logger.info("WCDB database opened successfully")
         except Exception as e:
             if isinstance(e, (KeyboardInterrupt, SystemExit)):
@@ -108,7 +110,8 @@ class WcdbBackend(AbstractWeChatBackend):
             # clean up native resources so repeated retries don't leak.
             if self._client is not None:
                 try:
-                    self._client.close()
+                    with self._client_lock:
+                        self._client.close()
                     self._client = None
                 except Exception:
                     pass
@@ -118,9 +121,6 @@ class WcdbBackend(AbstractWeChatBackend):
             except Exception:
                 pass
             return
-
-        # Resolve group talker IDs
-        self._resolve_groups()
 
         if not self._talker_ids:
             logger.error("No groups resolved. Check WECHAT_GROUPS.")
@@ -185,8 +185,9 @@ class WcdbBackend(AbstractWeChatBackend):
             # Drain in-flight callbacks gracefully
             self._pool.shutdown(wait=True, cancel_futures=True)
             self._pool = None
-            if self._client:
-                self._client.close()
+            with self._client_lock:
+                if self._client:
+                    self._client.close()
         logger.info("WcdbBackend stopped.")
 
     def send_text(self, chat_id: str, content: str) -> bool:
@@ -238,23 +239,24 @@ class WcdbBackend(AbstractWeChatBackend):
         or HWND became stale.
         """
         logger.warning("Reinitializing WCDB backend after consecutive errors...")
-        if self._client:
+        with self._client_lock:
+            if self._client:
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
             try:
-                self._client.close()
-            except Exception:
-                pass
-        try:
-            self._client = WcdbNativeClient()
-            self._client.init()
-            self._client.open()
-            logger.info("WCDB reinitialized successfully")
-        except Exception as e:
-            logger.error("WCDB reinitialization failed: %s", e)
-            raise
-        # Clear dedup set — WCDB may return messages with new IDs
-        self._known_ids = DedupSet(max_size=MAX_DEDUP_SIZE)
-        # Re-resolve groups (talker IDs may have changed)
-        self._resolve_groups()
+                self._client = WcdbNativeClient()
+                self._client.init()
+                self._client.open()
+                logger.info("WCDB reinitialized successfully")
+                # Clear dedup set — WCDB may return messages with new IDs
+                self._known_ids = DedupSet(max_size=MAX_DEDUP_SIZE)
+                # Re-resolve groups (talker IDs may have changed)
+                self._resolve_groups()
+            except Exception as e:
+                logger.error("WCDB reinitialization failed: %s", e)
+                raise
         # Re-find WeChat window
         hwnd = self._window.find_hwnd()
         if hwnd:

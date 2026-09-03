@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def discover_groups(client: Any) -> list[dict[str, Any]]:
@@ -25,5 +28,6 @@ def discover_groups(client: Any) -> list[dict[str, Any]]:
                 "member_count": len(members or []),
             })
         return sorted(result, key=lambda item: (item["display_name"].casefold(), item["chat_id"]))
-    except Exception as exc:
-        raise RuntimeError(f"group discovery failed: {exc}") from exc
+    except Exception:
+        logger.exception("Group metadata discovery failed")
+        raise RuntimeError("group discovery unavailable") from None

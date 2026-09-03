@@ -1148,7 +1148,12 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 self.send_json({"ok": True, "items": groups})
                 return
             if path == "/api/class-assistant/groups/discover" and self.command == "POST":
-                items = service.discover_groups()
+                try:
+                    items = service.discover_groups()
+                except Exception:
+                    logger.exception("Class-assistant group discovery failed")
+                    self._send_json_status({"ok": False, "error": "group discovery unavailable"}, 503)
+                    return
                 self.send_json({"ok": True, "items": [
                     {key: item[key] for key in ("chat_id", "display_name", "member_count")}
                     for item in items
