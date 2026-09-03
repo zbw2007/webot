@@ -40,3 +40,24 @@ def test_discover_groups_converts_backend_errors_to_controlled_error():
         discover_groups(Broken())
     assert "backend unavailable" not in str(error.value)
     assert "C:\\secret" not in str(error.value)
+
+
+def test_discover_groups_keeps_group_when_member_lookup_fails_and_deduplicates():
+    class PartialClient(FakeClient):
+        def get_sessions(self):
+            return [
+                {"username": "broken@chatroom", "nickname": "Broken"},
+                {"username": "ok@chatroom", "nickname": "OK"},
+                {"username": "ok@chatroom", "nickname": "Duplicate"},
+            ]
+
+        def get_group_members(self, chat_id):
+            if chat_id == "broken@chatroom":
+                raise RuntimeError("members unavailable")
+            return [{"wxid": "member"}]
+
+    result = discover_groups(PartialClient())
+    assert result == [
+        {"chat_id": "broken@chatroom", "display_name": "Broken", "member_count": 0},
+        {"chat_id": "ok@chatroom", "display_name": "OK", "member_count": 1},
+    ]

@@ -294,3 +294,31 @@ def test_discover_groups_uses_injected_read_only_metadata_provider(tmp_path):
     )
     assert service.discover_groups() == [{"chat_id": "class@chatroom", "display_name": "Class", "member_count": 42}]
     assert calls == ["discover"]
+
+
+@pytest.mark.parametrize("item", [
+    {"chat_id": "private-user", "display_name": "Private", "member_count": 1},
+    {"chat_id": "other", "display_name": "Other", "member_count": 1},
+    {"chat_id": "class@chatroom", "display_name": "Class", "member_count": -1},
+    {"chat_id": "class@chatroom", "display_name": "Class", "member_count": True},
+    {"chat_id": "class@chatroom", "display_name": "Class", "member_count": "3"},
+])
+def test_discover_groups_rejects_invalid_injected_metadata(tmp_path, item):
+    service = ClassAssistantService(
+        Config(), storage=Storage(str(tmp_path / "assistant.db")),
+        group_discoverer=lambda: [item],
+    )
+    assert service.discover_groups() == []
+
+
+def test_discover_groups_skips_invalid_entries_and_keeps_valid_groups(tmp_path):
+    service = ClassAssistantService(
+        Config(), storage=Storage(str(tmp_path / "assistant.db")),
+        group_discoverer=lambda: [
+            {"chat_id": "not-a-group", "display_name": "Private", "member_count": 1},
+            {"chat_id": "class@chatroom", "display_name": "Class", "member_count": 3},
+        ],
+    )
+    assert service.discover_groups() == [
+        {"chat_id": "class@chatroom", "display_name": "Class", "member_count": 3},
+    ]

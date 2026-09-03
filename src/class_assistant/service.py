@@ -94,11 +94,35 @@ class ClassAssistantService:
         if self._group_discoverer is None:
             raise RuntimeError("group discovery unavailable")
         try:
-            return [
-                {"chat_id": str(item["chat_id"]), "display_name": str(item["display_name"]),
-                 "member_count": int(item["member_count"])}
-                for item in self._group_discoverer()
-            ]
+            discovered = self._group_discoverer() or []
+            result = []
+            seen_chat_ids: set[str] = set()
+            for item in discovered:
+                if not isinstance(item, Mapping):
+                    continue
+                chat_id = item.get("chat_id")
+                member_count = item.get("member_count")
+                # Keep this boundary strict: bool is an int subclass, and
+                # coercing strings could allow malformed backend data through.
+                if (
+                    not isinstance(chat_id, str)
+                    or not chat_id.endswith("@chatroom")
+                    or not isinstance(member_count, int)
+                    or isinstance(member_count, bool)
+                    or member_count < 0
+                    or chat_id in seen_chat_ids
+                ):
+                    continue
+                seen_chat_ids.add(chat_id)
+                display_name = item.get("display_name")
+                if not isinstance(display_name, str):
+                    display_name = chat_id
+                result.append({
+                    "chat_id": chat_id,
+                    "display_name": display_name,
+                    "member_count": member_count,
+                })
+            return result
         except Exception as exc:
             if str(exc) == "group discovery unavailable":
                 raise
