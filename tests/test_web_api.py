@@ -1188,6 +1188,41 @@ class ApiConfigEndpointTests(unittest.TestCase):
             self.assertTrue(body["ok"])
             self.assertIsInstance(body["config"], dict)
 
+    def test_load_config_exposes_class_assistant_settings_without_secrets(self):
+        with patch("src.web.server._find_or_create_env") as mock_find:
+            fake_env = MagicMock()
+            fake_env.exists.return_value = True
+            fake_env.read_text.return_value = (
+                "CLASS_ASSISTANT_ENABLED=true\n"
+                "CLASS_ASSISTANT_GROUPS=group-a@chatroom,group-b@chatroom\n"
+                "COLLECTION_ENABLED=true\n"
+                "ANALYSIS_ENABLED=true\n"
+                "REVIEW_QUEUE_ENABLED=false\n"
+                "REAL_SEND_ENABLED=false\n"
+                "DRY_RUN=true\n"
+                "DIGEST_SCHEDULE=08:00,20:00\n"
+                "TIMEZONE=Asia/Shanghai\n"
+                "WCDB_KEY=wcdb-secret\n"
+                "OPENAI_API_KEY=sk-real-secret\n"
+            )
+            mock_find.return_value = fake_env
+            handler, sock = _build_handler("/api/load-config")
+            body = json.loads(sock.get_response_text().split("\r\n\r\n", 1)[1])
+
+        config = body["config"]
+        self.assertTrue(config["class_assistant_enabled"])
+        self.assertEqual(config["class_assistant_groups"], ["group-a@chatroom", "group-b@chatroom"])
+        self.assertTrue(config["collection_enabled"])
+        self.assertTrue(config["analysis_enabled"])
+        self.assertFalse(config["review_queue_enabled"])
+        self.assertFalse(config["real_send_enabled"])
+        self.assertTrue(config["dry_run"])
+        self.assertEqual(config["digest_schedule"], "08:00,20:00")
+        self.assertEqual(config["timezone"], "Asia/Shanghai")
+        self.assertNotIn("WCDB_KEY", config)
+        self.assertNotIn("wcdb-secret", json.dumps(config))
+        self.assertNotIn("sk-real-secret", json.dumps(config))
+
     def test_save_config_returns_ok_and_saved_keys(self):
         """POST /api/config saves settings and returns saved keys."""
         with patch("src.web.server._find_or_create_env") as mock_find:

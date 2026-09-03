@@ -1307,6 +1307,18 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 "voice_openai_api_key": _mask_key(raw.get("VOICE_OPENAI_API_KEY", "")),
                 "voice_openai_base_url": raw.get("VOICE_OPENAI_BASE_URL", ""),
                 "voice_local_model": raw.get("VOICE_LOCAL_MODEL", "small"),
+                "class_assistant_enabled": _bool_env(raw.get("CLASS_ASSISTANT_ENABLED", "false"), False),
+                "class_assistant_groups": _split_csv(raw.get("CLASS_ASSISTANT_GROUPS", "")),
+                "collection_enabled": _bool_env(raw.get("COLLECTION_ENABLED", "false"), False),
+                "analysis_enabled": _bool_env(raw.get("ANALYSIS_ENABLED", "false"), False),
+                "review_queue_enabled": _bool_env(raw.get("REVIEW_QUEUE_ENABLED", "true"), True),
+                "real_send_enabled": _bool_env(raw.get("REAL_SEND_ENABLED", "false"), False),
+                "dry_run": _bool_env(raw.get("DRY_RUN", "true"), True),
+                "digest_schedule": raw.get("DIGEST_SCHEDULE", "08:00,20:00"),
+                "timezone": raw.get("TIMEZONE", "Asia/Shanghai"),
+                "raw_message_retention_days": _int_env(raw.get("RAW_MESSAGE_RETENTION_DAYS", "7"), 7),
+                "draft_retention_days": _int_env(raw.get("DRAFT_RETENTION_DAYS", "30"), 30),
+                "audit_retention_days": _int_env(raw.get("AUDIT_RETENTION_DAYS", "30"), 30),
             }
             config_data.update(_feishu_config_from_raw(raw))
             config_data.update(_todo_config_from_raw(raw))

@@ -59,6 +59,30 @@ class CleanupClient:
         return []
 
 
+class SessionClient:
+    def __init__(self, sessions):
+        self.sessions = sessions
+        self.close_calls = 0
+
+    def get_sessions(self):
+        return self.sessions
+
+    def init(self):
+        pass
+
+    def open(self):
+        pass
+
+    def get_group_members(self, _chat_id):
+        return []
+
+    def resolve_nickname(self, username):
+        return username
+
+    def close(self):
+        self.close_calls += 1
+
+
 def test_reinitialize_serializes_close_and_discovery_client_calls(monkeypatch):
     closed = threading.Event()
     old_client = LifecycleClient(closed)
@@ -90,6 +114,33 @@ def test_start_closes_client_when_no_configured_groups_resolve(monkeypatch):
 
     backend.start(lambda _message: None)
 
+    assert client.close_calls == 1
+    assert backend._client is None
+
+
+def test_reinitialize_clears_stale_mapping_when_new_client_has_no_match(monkeypatch):
+    backend = WcdbBackend(groups=["missing@chatroom"])
+    old_client = SessionClient([])
+    new_client = SessionClient([])
+    backend._client = old_client
+    backend._talker_ids = {"old group": "old@chatroom"}
+    monkeypatch.setattr(wcdb_backend, "WcdbNativeClient", lambda: new_client)
+    monkeypatch.setattr(backend._window, "find_hwnd", lambda: None)
+
+    backend._reinitialize()
+
+    assert backend._talker_ids == {}
+
+
+def test_stop_closes_and_clears_client():
+    client = SessionClient([])
+    backend = WcdbBackend(groups=["group@chatroom"])
+    backend._client = client
+    backend._running = True
+
+    backend.stop()
+
+    assert backend._running is False
     assert client.close_calls == 1
     assert backend._client is None
 

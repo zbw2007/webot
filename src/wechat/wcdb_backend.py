@@ -232,6 +232,8 @@ class WcdbBackend(AbstractWeChatBackend):
         self._running = False
         if self._pool:
             self._pool.shutdown(wait=False)
+        with self._client_lock:
+            self._close_client_locked()
 
     # ── Recovery ─────────────────────────────────────────────────────
 
@@ -273,6 +275,10 @@ class WcdbBackend(AbstractWeChatBackend):
         Display names must be resolved via the DLL's get_display_names() or
         the local nickname cache (WeChat contacts / manual overrides).
         """
+        # A reinitialization may discover a different set of sessions.  Never
+        # let IDs from the previous client remain usable when resolution
+        # fails or yields no matching groups.
+        self._talker_ids.clear()
         sessions = self._client.get_sessions()
 
         # Build a map of all @chatroom entries: username -> {name, member_count}
